@@ -1,0 +1,24 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "A file was just edited. If you have elephant-coder indexed memories for this file, they may now be stale. Consider re-indexing the edited file with elephant-coder index_directory if it was a significant change."
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "A new file was just written. Consider indexing it with elephant-coder index_directory so it becomes searchable in future conversations."
+          }
+        ]
+      }
+    ]
+  }
+}
