@@ -163,7 +163,7 @@ def recall_file_memories(file_path: str) -> str:
 def index_directory(
     path: str = ".",
     patterns: str = "**/*.py",
-    max_files: int = 200,
+    max_files: int = 20000,
     force: bool = False,
 ) -> str:
     """Index source files in a directory, extracting function/class summaries.
@@ -202,11 +202,22 @@ def index_directory(
         ".mypy_cache",
         ".pytest_cache",
         "dist",
-        "build",
         ".eggs",
-        "*.egg-info",
+        "htmlcov",
+        "third_party",
     }
-    files = [f for f in files if f.is_file() and not any(part in skip_dirs for part in f.parts)]
+    # Prefixes that match directories starting with these strings (e.g. build, build312)
+    skip_prefixes = ("build", ".egg-info")
+
+    def _should_skip(filepath: Path) -> bool:
+        for part in filepath.parts:
+            if part in skip_dirs:
+                return True
+            if any(part.startswith(p) or part.endswith(p) for p in skip_prefixes):
+                return True
+        return False
+
+    files = [f for f in files if f.is_file() and not _should_skip(f)]
     files = files[:max_files]
 
     t0 = time.time()
@@ -278,12 +289,14 @@ def explore_structure(path: str = ".", max_depth: int = 3) -> str:
         ".mypy_cache",
         ".pytest_cache",
         "dist",
-        "build",
         ".eggs",
+        "htmlcov",
+        "third_party",
     }
+    skip_prefixes = ("build",)
 
     lines = [f"Project structure: {dir_path.name}/"]
-    _walk_tree(dir_path, dir_path, lines, skip_dirs, max_depth, depth=0)
+    _walk_tree(dir_path, dir_path, lines, skip_dirs, skip_prefixes, max_depth, depth=0)
     return "\n".join(lines)
 
 
@@ -292,6 +305,7 @@ def _walk_tree(
     current: Path,
     lines: list[str],
     skip_dirs: set[str],
+    skip_prefixes: tuple[str, ...],
     max_depth: int,
     depth: int,
 ) -> None:
@@ -305,7 +319,11 @@ def _walk_tree(
     except PermissionError:
         return
 
-    dirs = [e for e in entries if e.is_dir() and e.name not in skip_dirs]
+    dirs = [
+        e for e in entries
+        if e.is_dir() and e.name not in skip_dirs
+        and not any(e.name.startswith(p) for p in skip_prefixes)
+    ]
     files = [e for e in entries if e.is_file()]
 
     # Summarize files by extension
@@ -321,7 +339,7 @@ def _walk_tree(
         lines.append(f"{indent}{current.name}/")
 
     for d in dirs:
-        _walk_tree(root, d, lines, skip_dirs, max_depth, depth + 1)
+        _walk_tree(root, d, lines, skip_dirs, skip_prefixes, max_depth, depth + 1)
 
 
 @mcp.tool()

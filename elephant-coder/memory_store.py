@@ -243,7 +243,7 @@ class MemoryStore:
     lowest-relevance entries are evicted (like MemoryWrite overwrite mode).
     """
 
-    def __init__(self, project_root: str, max_memories: int = 10_000, redis_url: str | None = None):
+    def __init__(self, project_root: str, max_memories: int = 50_000, redis_url: str | None = None):
         self.project_root = project_root
         self.max_memories = max_memories
         db_path = _db_dir(project_root) / "memories.db"
