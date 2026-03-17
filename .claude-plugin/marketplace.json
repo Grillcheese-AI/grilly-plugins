@@ -1,0 +1,30 @@
+{
+  "name": "grilly-plugins",
+  "owner": {
+    "name": "Grillcheese AI"
+  },
+  "description": "Claude Code plugins by Grillcheese AI — persistent codebase memory and more",
+  "metadata": {
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "elephant-coder",
+      "source": "./elephant-coder",
+      "description": "Persistent codebase memory with multi-language indexing, full-text search, and automatic session indexing",
+      "version": "0.2.0",
+      "author": {
+        "name": "grillcheese"
+      },
+      "repository": "https://github.com/grillcheese-ai/grilly-plugins",
+      "keywords": [
+        "memory",
+        "indexing",
+        "codebase",
+        "search",
+        "code-intelligence"
+      ],
+      "category": "development"
+    }
+  ]
+}
