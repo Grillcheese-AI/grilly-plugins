@@ -1,7 +1,7 @@
 {
   "name": "elephant-coder",
   "description": "Persistent codebase memory with multi-language indexing, full-text search, and automatic session indexing",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": {
     "name": "grillcheese"
   },
