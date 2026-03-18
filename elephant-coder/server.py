@@ -25,6 +25,7 @@ from indexer import index_file
 from mcp.server.fastmcp import FastMCP
 from memory_store import MemoryEntry, MemoryStore, make_memory_id
 from retriever import format_results, recall, recall_file
+from settings import load_settings, save_settings
 
 # Logging to stderr only (stdout reserved for MCP stdio transport)
 logging.basicConfig(
@@ -73,6 +74,11 @@ def _normalize_path(path: str) -> str:
         root = _detect_project_root()
         p = Path(root) / p
     return str(p.resolve())
+
+
+def _load_settings() -> dict:
+    """Load settings for the current project."""
+    return load_settings(_detect_project_root())
 
 
 # ------------------------------------------------------------------
@@ -243,8 +249,8 @@ def index_directory(
                     pass
 
             entries = index_file(fp_str)
-            for entry in entries:
-                store.upsert(entry)
+            if entries:
+                store.upsert_batch(entries)
             total_symbols += len(entries)
             indexed_files += 1
         except Exception as exc:
@@ -253,6 +259,75 @@ def index_directory(
     elapsed = time.time() - t0
 
     # Auto-consolidate if near capacity
+    if should_consolidate(store):
+        cstats = consolidate(store)
+        logger.info("Auto-consolidation: %s", cstats)
+
+    result = f"Indexed {indexed_files} files, {total_symbols} symbols in {elapsed:.1f}s"
+    if skipped_files:
+        result += f"\nSkipped {skipped_files} unchanged files"
+    result += f"\nTotal memories: {store.count()}/{store.max_memories}"
+    return result
+
+
+_ALL_PATTERNS = [
+    "**/*.py", "**/*.ts", "**/*.js", "**/*.tsx", "**/*.jsx",
+    "**/*.cpp", "**/*.c", "**/*.h", "**/*.hpp", "**/*.hxx", "**/*.cc", "**/*.cxx",
+    "**/*.glsl", "**/*.vert", "**/*.frag", "**/*.comp",
+    "**/*.md", "**/*.toml", "**/*.json", "**/*.yaml", "**/*.yml",
+    "**/CMakeLists.txt", "**/*.cmake",
+]
+
+
+@mcp.tool()
+def index_all(force: bool = False) -> str:
+    """Index the entire project — all supported file types in one call.
+
+    Replaces the need to call index_directory() multiple times with
+    different patterns. Uses batch upserts for performance. Automatically
+    skips unchanged files unless force=True.
+
+    This is the recommended way to index. Called automatically at session start.
+
+    Args:
+        force: If True, re-index all files even if unchanged (default: False)
+    """
+    store = _get_store()
+    settings = _load_settings()
+    dir_path = Path(_detect_project_root())
+    skip_dirs = set(settings.get("skip_dirs", []))
+
+    t0 = time.time()
+    total_symbols = 0
+    indexed_files = 0
+    skipped_files = 0
+
+    for pattern in _ALL_PATTERNS:
+        files = sorted(dir_path.glob(pattern))
+        files = [f for f in files if f.is_file() and not any(part in skip_dirs for part in f.parts)]
+
+        for fpath in files:
+            try:
+                fp_str = str(fpath)
+                if not force:
+                    try:
+                        actual_mtime = os.path.getmtime(fp_str)
+                        existing = store.search_by_file(fp_str)
+                        if existing and all(e.file_mtime >= actual_mtime for e in existing):
+                            skipped_files += 1
+                            continue
+                    except OSError:
+                        pass
+
+                entries = index_file(fp_str)
+                if entries:
+                    store.upsert_batch(entries)
+                    total_symbols += len(entries)
+                indexed_files += 1
+            except Exception as exc:
+                logger.warning("Failed to index %s: %s", fpath, exc)
+
+    elapsed = time.time() - t0
     if should_consolidate(store):
         cstats = consolidate(store)
         logger.info("Auto-consolidation: %s", cstats)
