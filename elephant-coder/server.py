@@ -22,6 +22,7 @@ from pathlib import Path
 
 from consolidator import consolidate, detect_stale, should_consolidate
 from indexer import index_file
+from link_graph import resolve_python_imports, resolve_cpp_includes, detect_shader_dispatches, resolve_module_to_path
 from mcp.server.fastmcp import FastMCP
 from memory_store import MemoryEntry, MemoryStore, make_memory_id
 from retriever import format_results, recall, recall_file
@@ -82,6 +83,42 @@ def _normalize_path(path: str) -> str:
 def _load_settings() -> dict:
     """Load settings for the current project."""
     return load_settings(_detect_project_root())
+
+
+def _extract_and_store_links(store: MemoryStore, fpath: Path, project_root: Path) -> None:
+    """Extract imports/includes from a file and store as links."""
+    suffix = fpath.suffix.lower()
+    fp_str = str(fpath)
+
+    try:
+        source = fpath.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+
+    store.clear_file_links(fp_str)
+    links: list[tuple[str, str, str, str | None]] = []
+
+    if suffix == ".py":
+        for module in resolve_python_imports(source):
+            resolved = resolve_module_to_path(module, str(project_root), fp_str)
+            if resolved:
+                links.append((fp_str, resolved, "import", module))
+        for shader_name in detect_shader_dispatches(source):
+            for shader_ext in [".glsl", ".comp", ".vert", ".frag"]:
+                shader_path = project_root / "shaders" / f"{shader_name}{shader_ext}"
+                if shader_path.exists():
+                    links.append((fp_str, str(shader_path.resolve()), "shader_dispatch", shader_name))
+                    break
+    elif suffix in (".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx"):
+        for include in resolve_cpp_includes(source):
+            for base in [fpath.parent, project_root]:
+                candidate = base / include
+                if candidate.exists():
+                    links.append((fp_str, str(candidate.resolve()), "include", include))
+                    break
+
+    if links:
+        store.add_file_links_batch(links)
 
 
 # ------------------------------------------------------------------
@@ -327,6 +364,7 @@ def index_all(force: bool = False) -> str:
                 entries = index_file(fp_str)
                 if entries:
                     store.upsert_batch(entries)
+                    _extract_and_store_links(store, fpath, dir_path)
                     total_symbols += len(entries)
                 indexed_files += 1
             except Exception as exc:
