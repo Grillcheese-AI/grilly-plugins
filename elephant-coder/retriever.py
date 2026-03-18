@@ -35,6 +35,7 @@ def recall(
     query: str,
     limit: int = 5,
     kind: str | None = None,
+    relevance_threshold: float = 0.0,
 ) -> list[MemoryEntry]:
     """Search memories and return ranked results.
 
@@ -46,6 +47,9 @@ def recall(
 
     if kind:
         results = [r for r in results if r.kind == kind]
+
+    if relevance_threshold > 0:
+        results = [r for r in results if r.relevance_score >= relevance_threshold]
 
     results = results[:limit]
 

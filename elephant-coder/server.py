@@ -53,8 +53,11 @@ def _get_store() -> MemoryStore:
     global _store
     if _store is None:
         project_root = _detect_project_root()
-        _store = MemoryStore(project_root, redis_url=_redis_url)
-        logger.info("Memory store initialized for project: %s", project_root)
+        settings = load_settings(project_root)
+        redis_url = settings.get("redis_url") or _redis_url
+        max_mem = settings.get("max_memories", 50_000)
+        _store = MemoryStore(project_root, max_memories=max_mem, redis_url=redis_url)
+        logger.info("Memory store initialized for project: %s (max: %d)", project_root, max_mem)
     return _store
 
 
@@ -142,7 +145,9 @@ def recall_memories(query: str, limit: int = 5, kind: str | None = None) -> str:
         kind: Optional filter by kind ("function", "class", "module", etc.)
     """
     store = _get_store()
-    results = recall(store, query, limit=limit, kind=kind)
+    settings = _load_settings()
+    threshold = settings.get("relevance_threshold", 0.0)
+    results = recall(store, query, limit=limit, kind=kind, relevance_threshold=threshold)
     return format_results(results)
 
 
