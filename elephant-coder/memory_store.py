@@ -308,6 +308,20 @@ class MemoryStore:
         """)
         self._conn.commit()
 
+        # File link graph
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS file_links (
+                source_path TEXT NOT NULL,
+                target_path TEXT NOT NULL,
+                link_type TEXT NOT NULL,
+                symbol_name TEXT,
+                PRIMARY KEY (source_path, target_path, link_type)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_links_target ON file_links(target_path)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_links_source ON file_links(source_path)")
+        self._conn.commit()
+
     # ------------------------------------------------------------------
     # CRUD
     # ------------------------------------------------------------------
@@ -677,6 +691,49 @@ class MemoryStore:
             "redis_connected": self._cache.available,
         }
         return result
+
+    # ------------------------------------------------------------------
+    # File Link Graph
+    # ------------------------------------------------------------------
+
+    def add_file_link(self, source_path: str, target_path: str, link_type: str, symbol_name: str | None = None) -> None:
+        """Add a directed link between two files."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO file_links (source_path, target_path, link_type, symbol_name) VALUES (?, ?, ?, ?)",
+            (source_path, target_path, link_type, symbol_name))
+        self._conn.commit()
+
+    def add_file_links_batch(self, links: list[tuple[str, str, str, str | None]]) -> None:
+        """Batch add file links. Each tuple: (source, target, link_type, symbol_name)."""
+        if not links:
+            return
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO file_links (source_path, target_path, link_type, symbol_name) VALUES (?, ?, ?, ?)", links)
+        self._conn.commit()
+
+    def get_outbound_links(self, source_path: str) -> list[dict]:
+        """Get all files that source_path imports/includes."""
+        rows = self._conn.execute("SELECT * FROM file_links WHERE source_path = ? ORDER BY target_path", (source_path,)).fetchall()
+        return [{"source_path": r["source_path"], "target_path": r["target_path"],
+                 "link_type": r["link_type"], "symbol_name": r["symbol_name"]} for r in rows]
+
+    def get_inbound_links(self, target_path: str) -> list[dict]:
+        """Get all files that import/include target_path."""
+        rows = self._conn.execute("SELECT * FROM file_links WHERE target_path = ? ORDER BY source_path", (target_path,)).fetchall()
+        return [{"source_path": r["source_path"], "target_path": r["target_path"],
+                 "link_type": r["link_type"], "symbol_name": r["symbol_name"]} for r in rows]
+
+    def get_hub_files(self, limit: int = 10) -> list[dict]:
+        """Get files with the most inbound links (architectural pillars)."""
+        rows = self._conn.execute(
+            "SELECT target_path, COUNT(*) as inbound_count FROM file_links GROUP BY target_path ORDER BY inbound_count DESC LIMIT ?",
+            (limit,)).fetchall()
+        return [{"file_path": r["target_path"], "inbound_count": r["inbound_count"]} for r in rows]
+
+    def clear_file_links(self, source_path: str) -> None:
+        """Clear all outbound links for a file (before re-indexing)."""
+        self._conn.execute("DELETE FROM file_links WHERE source_path = ?", (source_path,))
+        self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
