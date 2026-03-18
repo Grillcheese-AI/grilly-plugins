@@ -32,6 +32,9 @@ from retriever import format_results, recall, recall_file
 from settings import load_settings, save_settings
 from task_manager import TaskManager
 from scope_guard import check_file_size, check_duplicate_file
+from news_reader import fetch_feeds, deduplicate_articles, generate_briefing, fetch_full_article
+from research_engine import call_openrouter, build_review_prompt, build_audit_prompt
+from global_store import GlobalKnowledgeStore
 
 # Logging to stderr only (stdout reserved for MCP stdio transport)
 logging.basicConfig(
@@ -100,6 +103,15 @@ def _get_task_manager() -> TaskManager:
         db_dir.mkdir(parents=True, exist_ok=True)
         _task_mgr = TaskManager(str(db_dir))
     return _task_mgr
+
+
+_global: GlobalKnowledgeStore | None = None
+
+def _get_global_store() -> GlobalKnowledgeStore:
+    global _global
+    if _global is None:
+        _global = GlobalKnowledgeStore()
+    return _global
 
 
 def _extract_and_store_links(store: MemoryStore, fpath: Path, project_root: Path) -> None:
@@ -563,6 +575,162 @@ def set_project_objectives(objectives: str) -> str:
     obj_list = [o.strip() for o in objectives.split("|") if o.strip()]
     tm.set_objectives(obj_list)
     return f"Set {len(obj_list)} objectives."
+
+
+@mcp.tool()
+def get_news_briefing(topics: str = "") -> str:
+    """Fetch today's news from configured RSS feeds.
+
+    Reads feeds, follows links to full articles when needed,
+    stores new articles as research notes, returns a briefing.
+    Called automatically at session start.
+
+    Args:
+        topics: Optional comma-separated topic filter
+    """
+    settings = _load_settings()
+    feeds = settings.get("rss_feeds", [])
+    if not feeds:
+        return "No RSS feeds configured in settings."
+
+    max_per = settings.get("rss_max_articles_per_feed", 5)
+    articles = fetch_feeds(feeds, max_per_feed=max_per)
+
+    # Deduplicate against stored notes
+    gstore = _get_global_store()
+    existing = set()
+    for note in gstore.search_notes("", limit=500):
+        if note.get("source"):
+            existing.add(note["source"])
+    articles = deduplicate_articles(articles, existing)
+
+    # Fetch full articles if configured
+    if settings.get("rss_fetch_full_articles", True):
+        for article in articles:
+            if len(article.get("summary", "")) < 200:
+                try:
+                    full = fetch_full_article(article["link"])
+                    if full and len(full) > len(article.get("summary", "")):
+                        article["summary"] = full
+                except Exception:
+                    pass
+
+    # Store as research notes
+    for article in articles:
+        gstore.save_note(
+            topic=article.get("title", "Untitled"),
+            summary=article.get("summary", ""),
+            source=article.get("link", ""),
+            tags=[article.get("source_feed", "news"), "rss"],
+        )
+
+    # Filter by topics if requested
+    if topics:
+        topic_list = [t.strip().lower() for t in topics.split(",")]
+        articles = [a for a in articles if any(t in a.get("title", "").lower() or t in a.get("summary", "").lower() for t in topic_list)]
+
+    return generate_briefing(articles)
+
+
+@mcp.tool()
+def take_note(topic: str, summary: str, source: str = "", tags: str = "") -> str:
+    """Save a research note for future reference.
+
+    Use when you find something interesting — papers, techniques,
+    ideas, patterns. Notes persist across sessions.
+
+    Args:
+        topic: Brief topic name
+        summary: What you learned
+        source: Where you found it (URL, paper ID, etc.)
+        tags: Comma-separated tags
+    """
+    gstore = _get_global_store()
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+    note_id = gstore.save_note(topic=topic, summary=summary, source=source, tags=tag_list)
+    return f"Note saved (id: {note_id}): {topic}"
+
+
+@mcp.tool()
+def recall_notes(query: str, limit: int = 10) -> str:
+    """Search your research notes.
+
+    Args:
+        query: Search keywords
+        limit: Max results
+    """
+    gstore = _get_global_store()
+    notes = gstore.search_notes(query, limit=limit)
+    if not notes:
+        return f"No notes found for '{query}'."
+    lines = [f"## Research Notes ({len(notes)} results)", ""]
+    for n in notes:
+        tags = ", ".join(n.get("tags", []))
+        lines.append(f"**{n['topic']}** [{tags}]")
+        lines.append(f"  {n['summary'][:200]}")
+        if n.get("source"):
+            lines.append(f"  Source: {n['source']}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_external_review(plan: str, context: str = "") -> str:
+    """Get an adversarial review from an external model via OpenRouter.
+
+    Sends the plan to Gemini 3.1 Flash Lite for independent review.
+    Requires external_validation.enabled=true and an OpenRouter API key.
+
+    Args:
+        plan: The plan text to review
+        context: Additional context (objectives, constraints)
+    """
+    settings = _load_settings()
+    ev = settings.get("external_validation", {})
+    if not ev.get("enabled"):
+        return "External validation is disabled. Enable in settings."
+    api_key = ev.get("openrouter_api_key")
+    if not api_key:
+        return "No OpenRouter API key configured. Set external_validation.openrouter_api_key in settings or OPENROUTER_API_KEY env var."
+    model = ev.get("model", "google/gemini-3.1-flash-lite-preview")
+    objectives = context.split("|") if context else []
+    try:
+        result = call_openrouter(
+            build_review_prompt(plan, objectives, []),
+            api_key, model)
+        return f"## External Review ({result['model']})\n\n{result['review']}"
+    except Exception as exc:
+        return f"External review failed: {exc}"
+
+
+@mcp.tool()
+def request_audit(task_id: str, files_changed: str = "", test_results: str = "") -> str:
+    """Request an independent audit of completed work.
+
+    Args:
+        task_id: Task ID that was completed
+        files_changed: Summary of files changed
+        test_results: Test output
+    """
+    settings = _load_settings()
+    ev = settings.get("external_validation", {})
+    if not ev.get("enabled"):
+        return "External validation is disabled."
+    api_key = ev.get("openrouter_api_key")
+    if not api_key:
+        return "No OpenRouter API key configured."
+    model = ev.get("model", "google/gemini-3.1-flash-lite-preview")
+    tm = _get_task_manager()
+    task = tm.get_task(task_id)
+    task_desc = task["description"] if task else task_id
+    files = [f.strip() for f in files_changed.split(",") if f.strip()]
+    try:
+        result = call_openrouter(
+            build_audit_prompt(task_desc, files, test_results),
+            api_key, model)
+        return f"## Audit ({result['model']})\n\n{result['review']}"
+    except Exception as exc:
+        return f"Audit failed: {exc}"
 
 
 @mcp.tool()

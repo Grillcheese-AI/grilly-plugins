@@ -36,3 +36,19 @@ def test_get_tasks_exists():
 def test_add_task_exists():
     from server import add_task
     assert callable(add_task)
+
+def test_take_note_exists():
+    from server import take_note
+    assert callable(take_note)
+
+def test_recall_notes_exists():
+    from server import recall_notes
+    assert callable(recall_notes)
+
+def test_get_news_briefing_exists():
+    from server import get_news_briefing
+    assert callable(get_news_briefing)
+
+def test_get_external_review_exists():
+    from server import get_external_review
+    assert callable(get_external_review)
