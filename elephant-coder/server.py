@@ -133,6 +133,93 @@ def _get_global_store() -> GlobalKnowledgeStore:
     return _global
 
 
+def _get_project_keywords() -> list[str]:
+    """Extract keywords that describe the current project's domain.
+
+    Pulls from: project objectives, directory name, pyproject.toml description,
+    top indexed module names, and README headings. Used to filter RSS feeds
+    and rank news articles by project relevance.
+    """
+    keywords = []
+    project_root = _detect_project_root()
+    root_path = Path(project_root)
+
+    # 1. Project name from directory
+    keywords.append(root_path.name.lower())
+
+    # 2. Objectives from task manager
+    try:
+        tm = _get_task_manager()
+        for obj in tm.get_objectives():
+            # Split objectives into words, keep meaningful ones
+            for word in obj.lower().split():
+                if len(word) > 3 and word not in ("this", "that", "with", "from", "into", "make", "ensure"):
+                    keywords.append(word)
+    except Exception:
+        pass
+
+    # 3. pyproject.toml — project name, description, keywords
+    pyproj = root_path / "pyproject.toml"
+    if pyproj.exists():
+        try:
+            text = pyproj.read_text(encoding="utf-8")
+            import re
+            # Extract project name
+            m = re.search(r'name\s*=\s*"([^"]+)"', text)
+            if m:
+                keywords.append(m.group(1).lower())
+            # Extract description words
+            m = re.search(r'description\s*=\s*"([^"]+)"', text)
+            if m:
+                for word in m.group(1).lower().split():
+                    if len(word) > 3:
+                        keywords.append(word)
+            # Extract explicit keywords
+            for m in re.finditer(r'"(\w[\w-]+)"', text):
+                kw = m.group(1).lower()
+                if len(kw) > 3:
+                    keywords.append(kw)
+        except Exception:
+            pass
+
+    # 4. package.json for JS/TS projects
+    pkgjson = root_path / "package.json"
+    if pkgjson.exists():
+        try:
+            import json as _json
+            data = _json.loads(pkgjson.read_text())
+            if "name" in data:
+                keywords.append(data["name"].lower())
+            if "description" in data:
+                for word in data["description"].lower().split():
+                    if len(word) > 3:
+                        keywords.append(word)
+            for kw in data.get("keywords", []):
+                keywords.append(kw.lower())
+        except Exception:
+            pass
+
+    # 5. Top module names from index (most-connected = most relevant)
+    try:
+        store = _get_store()
+        hubs = store.get_hub_files(limit=5)
+        for hub in hubs:
+            name = Path(hub["file_path"]).stem.lower()
+            if len(name) > 2:
+                keywords.append(name)
+    except Exception:
+        pass
+
+    # Deduplicate and return
+    seen = set()
+    unique = []
+    for kw in keywords:
+        if kw not in seen:
+            seen.add(kw)
+            unique.append(kw)
+    return unique
+
+
 def _extract_and_store_links(store: MemoryStore, fpath: Path, project_root: Path) -> None:
     """Extract imports/includes from a file and store as links."""
     suffix = fpath.suffix.lower()
@@ -643,10 +730,26 @@ def get_news_briefing(topics: str = "") -> str:
             tags=[article.get("source_feed", "news"), "rss"],
         )
 
-    # Filter by topics if requested
+    # Auto-detect project-relevant topics from objectives + indexed keywords
+    project_keywords = _get_project_keywords()
     if topics:
-        topic_list = [t.strip().lower() for t in topics.split(",")]
-        articles = [a for a in articles if any(t in a.get("title", "").lower() or t in a.get("summary", "").lower() for t in topic_list)]
+        project_keywords.extend([t.strip().lower() for t in topics.split(",")])
+
+    if project_keywords:
+        # Score articles by project relevance
+        relevant = []
+        general = []
+        for a in articles:
+            text = (a.get("title", "") + " " + a.get("summary", "")).lower()
+            score = sum(1 for kw in project_keywords if kw in text)
+            if score > 0:
+                a["_relevance"] = score
+                relevant.append(a)
+            else:
+                general.append(a)
+        # Sort relevant by score descending
+        relevant.sort(key=lambda x: x.get("_relevance", 0), reverse=True)
+        articles = relevant + general
 
     return generate_briefing(articles)
 
