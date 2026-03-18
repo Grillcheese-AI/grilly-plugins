@@ -34,3 +34,5 @@ if os.environ.get("CLAUDE_PLUGIN_ROOT"):
     }))
 else:
     print(json.dumps({"additional_context": prompt}))
+import sys
+sys.exit(0)

@@ -18,3 +18,5 @@ print(json.dumps({
         "additionalContext": prompt
     }
 }))
+import sys
+sys.exit(0)
