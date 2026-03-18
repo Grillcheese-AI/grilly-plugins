@@ -13,3 +13,9 @@ def test_load_settings_exists():
     """_load_settings helper should be importable."""
     from server import _load_settings
     assert callable(_load_settings)
+
+
+def test_update_settings_exists():
+    """update_settings should be importable from server module."""
+    from server import update_settings
+    assert callable(update_settings)

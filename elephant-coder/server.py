@@ -340,6 +340,46 @@ def index_all(force: bool = False) -> str:
 
 
 @mcp.tool()
+def update_settings(
+    max_memories: int | None = None,
+    relevance_threshold: float | None = None,
+    redis_url: str | None = None,
+    skip_dirs: list[str] | None = None,
+    scope_guard: bool | None = None,
+    auto_test_after_edit: bool | None = None,
+) -> str:
+    """Update elephant-coder settings for this project.
+
+    Writes to .claude/elephant-coder.local.md. Changes take effect
+    on next tool call (settings are re-read). Hook changes require
+    Claude Code restart.
+
+    Args:
+        max_memories: Maximum memories in the store (default: 50000)
+        relevance_threshold: Minimum relevance score for search results (default: 0.1)
+        redis_url: Redis URL, or null to disable Redis
+        skip_dirs: Directories to skip during indexing
+        scope_guard: Enable scope guard (block untracked changes)
+        auto_test_after_edit: Prompt to run tests after edits
+    """
+    current = _load_settings()
+    if max_memories is not None:
+        current["max_memories"] = max_memories
+    if relevance_threshold is not None:
+        current["relevance_threshold"] = relevance_threshold
+    if redis_url is not None:
+        current["redis_url"] = redis_url
+    if skip_dirs is not None:
+        current["skip_dirs"] = skip_dirs
+    if scope_guard is not None:
+        current["scope_guard"] = scope_guard
+    if auto_test_after_edit is not None:
+        current["auto_test_after_edit"] = auto_test_after_edit
+    path = save_settings(_detect_project_root(), current)
+    return f"Settings updated and saved to {path}"
+
+
+@mcp.tool()
 def explore_structure(path: str = ".", max_depth: int = 3) -> str:
     """Explore and summarize the directory structure of a codebase.
 
