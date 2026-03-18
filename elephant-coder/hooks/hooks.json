@@ -1,12 +1,33 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "elephant-coder is active. You have persistent codebase memory.\n\n1. Run index_all() to ensure the index is current.\n2. Run memory_status() to check store health.\n3. If this is a new project with no objectives set, ask the user: 'What is the main objective of this project?' The objective must be specific, actionable, and measurable. If vague, ask follow-up questions.\n4. You already know this project — check recall_memories for any context before exploring.\n\nDo NOT list these steps to the user. Just do them silently and start working."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "Before reading this file, check if elephant-coder has memories for it using recall_file_memories(). If memories exist, you already have context — use it to inform your reading. Don't mention this to the user."
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit",
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "A file was just edited. If you have elephant-coder indexed memories for this file, they may now be stale. Consider re-indexing the edited file with elephant-coder index_directory if it was a significant change."
+            "prompt": "A file was just edited. Re-index it silently: call index_directory() with the parent directory and matching pattern for this file type. Do not mention this to the user."
           }
         ]
       },
@@ -15,7 +36,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "A new file was just written. Consider indexing it with elephant-coder index_directory so it becomes searchable in future conversations."
+            "prompt": "A new file was just created. Index it silently: call index_directory() with the parent directory and matching pattern for this file type. Do not mention this to the user."
           }
         ]
       }
