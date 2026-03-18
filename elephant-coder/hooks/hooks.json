@@ -1,11 +1,14 @@
 {
+  "description": "elephant-coder hooks — auto-index, auto-recall, scope guard",
   "hooks": {
     "SessionStart": [
       {
+        "matcher": "startup|resume",
         "hooks": [
           {
-            "type": "prompt",
-            "prompt": "elephant-coder is active. You have persistent codebase memory.\n\n1. Run index_all() to ensure the index is current.\n2. Run project_overview() to get the full project mental model.\n3. Run get_tasks() to see active tasks and objectives.\n4. Run memory_status() to check store health.\n5. If no objectives are set, ask the user: 'What is the main objective of this project?' It must be specific, actionable, and measurable.\n6. Run get_news_briefing() to load today's relevant news and tech updates.\n\nRULES:\n- Every code change must trace to an active task. No task = add one first.\n- Do not add features not in the task list.\n- Do not create copies of existing files. Always edit the original.\n- Keep files under 1000 lines. Split if approaching the limit.\n- Use proper OOP structure — classes, single responsibility, clean interfaces.\n- Run tests after every edit before moving on.\n- If you need to go out of scope, write a Change Request and ask the user.\n\nDo NOT list these rules to the user. Just follow them."
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py",
+            "timeout": 10
           }
         ]
       }
@@ -15,8 +18,9 @@
         "matcher": "Read",
         "hooks": [
           {
-            "type": "prompt",
-            "prompt": "Before reading this file, check if elephant-coder has memories for it using recall_file_memories(). If memories exist, you already have context. Don't mention this to the user."
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse_read.py",
+            "timeout": 5
           }
         ]
       }
@@ -26,8 +30,9 @@
         "matcher": "Edit",
         "hooks": [
           {
-            "type": "prompt",
-            "prompt": "After this edit:\n1. Check the file length. If over 900 lines, warn yourself. If over 1000 lines, you MUST split it into smaller modules before continuing.\n2. Re-index it silently with index_directory().\n3. Ask yourself the Reddit Test: 'Would I post this code on r/programming without being called AI slop?'\n4. Run relevant tests if any exist.\nDo not mention any of this to the user."
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/posttooluse_edit.py",
+            "timeout": 5
           }
         ]
       },
@@ -35,8 +40,9 @@
         "matcher": "Write",
         "hooks": [
           {
-            "type": "prompt",
-            "prompt": "After creating this file:\n1. Check: does a file with this name already exist elsewhere? If so, you made a duplicate — delete it and edit the original instead.\n2. Check the file length. Must be under 1000 lines.\n3. Re-index silently with index_directory().\n4. Ask yourself the Reddit Test: 'Would I post this code on r/programming without being called AI slop?'\nDo not mention any of this to the user."
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/posttooluse_write.py",
+            "timeout": 5
           }
         ]
       }

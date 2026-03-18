@@ -50,28 +50,48 @@ logger = logging.getLogger("elephant-coder")
 
 mcp = FastMCP("elephant-coder")
 
-# Lazy-initialized store (needs project root at first tool call)
-_store: MemoryStore | None = None
+# Per-project store cache — maps project_root -> MemoryStore
+_stores: dict[str, MemoryStore] = {}
 
 # Redis URL from CLI arg or env var
 _redis_url: str | None = None
 
+# Project root override (set by Claude Code via environment or tool call)
+_project_root_override: str | None = None
+
 
 def _get_store() -> MemoryStore:
-    """Get or initialize the memory store for the current project."""
-    global _store
-    if _store is None:
-        project_root = _detect_project_root()
+    """Get or initialize the memory store for the current project.
+
+    Uses a per-project cache so switching between projects (different
+    working directories) doesn't corrupt each other's memory.
+    """
+    project_root = _detect_project_root()
+    if project_root not in _stores:
         settings = load_settings(project_root)
         redis_url = settings.get("redis_url") or _redis_url
         max_mem = settings.get("max_memories", 50_000)
-        _store = MemoryStore(project_root, max_memories=max_mem, redis_url=redis_url)
+        _stores[project_root] = MemoryStore(project_root, max_memories=max_mem, redis_url=redis_url)
         logger.info("Memory store initialized for project: %s (max: %d)", project_root, max_mem)
-    return _store
+    return _stores[project_root]
 
 
 def _detect_project_root() -> str:
-    """Walk up from cwd to find a project root (has .git or pyproject.toml)."""
+    """Detect the project root for the current context.
+
+    Priority:
+    1. Explicit override (set by set_project_root tool)
+    2. CLAUDE_PROJECT_DIR environment variable (set by Claude Code)
+    3. Walk up from cwd to find .git or pyproject.toml
+    """
+    if _project_root_override:
+        return _project_root_override
+
+    # Claude Code sets this env var for multi-workspace setups
+    env_root = os.environ.get("CLAUDE_PROJECT_DIR")
+    if env_root and Path(env_root).exists():
+        return str(Path(env_root).resolve())
+
     cwd = Path.cwd()
     for parent in [cwd, *cwd.parents]:
         if (parent / ".git").exists() or (parent / "pyproject.toml").exists():
@@ -93,16 +113,15 @@ def _load_settings() -> dict:
     return load_settings(_detect_project_root())
 
 
-_task_mgr: TaskManager | None = None
+_task_mgrs: dict[str, TaskManager] = {}
 
 def _get_task_manager() -> TaskManager:
-    global _task_mgr
-    if _task_mgr is None:
-        project_root = _detect_project_root()
+    project_root = _detect_project_root()
+    if project_root not in _task_mgrs:
         db_dir = Path.home() / ".elephant-coder" / hashlib.sha256(project_root.encode()).hexdigest()[:12]
         db_dir.mkdir(parents=True, exist_ok=True)
-        _task_mgr = TaskManager(str(db_dir))
-    return _task_mgr
+        _task_mgrs[project_root] = TaskManager(str(db_dir))
+    return _task_mgrs[project_root]
 
 
 _global: GlobalKnowledgeStore | None = None
