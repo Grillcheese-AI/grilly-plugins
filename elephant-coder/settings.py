@@ -31,6 +31,27 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "audit_completed_tasks": True,
         "require_approval_on_issues": True,
     },
+    "rss_feeds": [
+        "https://hackernoon.com/feed",
+        "https://globalnews.ca/feed/",
+        "https://feedx.net/rss/ap.xml",
+        "https://www.theverge.com/rss/index.xml",
+        "https://feeds.arstechnica.com/arstechnica/index",
+        "https://techcrunch.com/feed/",
+        "https://blog.bytebytego.com/feed",
+        "https://www.wired.com/feed/tag/ai/latest/rss",
+        "https://www.wired.com/feed/category/ideas/latest/rss",
+        "https://rss.arxiv.org/rss/math.QA",
+        "https://rss.arxiv.org/rss/cs.ai",
+        "https://www.reddit.com/r/news/.rss",
+        "https://www.reddit.com/r/LocalLLaMA/.rss",
+        "https://www.reddit.com/r/singularity/.rss",
+        "https://www.cbc.ca/webfeed/rss/rss-topstories",
+        "https://www.cbc.ca/webfeed/rss/rss-technology",
+        "https://www.cbc.ca/webfeed/rss/rss-world",
+    ],
+    "rss_max_articles_per_feed": 5,
+    "rss_fetch_full_articles": True,
 }
 
 _SETTINGS_PATH = Path(".claude") / "elephant-coder.local.md"
