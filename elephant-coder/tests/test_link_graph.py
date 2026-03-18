@@ -70,3 +70,46 @@ def test_batch_add_links():
         store.add_file_links_batch(links)
         assert len(store.get_outbound_links("/src/main.py")) == 3
         store.close()
+
+
+def test_resolve_python_imports():
+    source = '''
+import os
+import sys
+from pathlib import Path
+from grilly.nn import Linear
+from grilly.backend.core import VulkanDevice
+from .utils import helper
+import numpy as np
+'''
+    imports = resolve_python_imports(source)
+    assert "os" in imports
+    assert "grilly.nn" in imports
+    assert "grilly.backend.core" in imports
+    assert ".utils" in imports
+    assert "numpy" in imports
+
+
+def test_resolve_cpp_includes():
+    source = '''
+#include <vulkan/vulkan.h>
+#include "core.h"
+#include "backend/pipelines.h"
+#include <cstdlib>
+'''
+    includes = resolve_cpp_includes(source)
+    assert "vulkan/vulkan.h" in includes
+    assert "core.h" in includes
+    assert "backend/pipelines.h" in includes
+
+
+def test_detect_shader_dispatches():
+    source = '''
+shader = self._load_shader("conv2d_gemm")
+pipeline = self.create_pipeline("flash_attention2")
+self._compile_shader("matmul_tiled")
+'''
+    dispatches = detect_shader_dispatches(source)
+    assert "conv2d_gemm" in dispatches
+    assert "flash_attention2" in dispatches
+    assert "matmul_tiled" in dispatches
