@@ -112,10 +112,8 @@ class RedisCache:
             self._available = True
             logger.info("Redis cache connected: %s", redis_url)
         except Exception as exc:
-            raise RuntimeError(
-                f"Redis is required but unavailable at {redis_url}: {exc}\n"
-                "Start Redis with: redis-server --port 6380"
-            ) from exc
+            self._available = False
+            logger.info("Redis not available at %s — using SQLite only (this is fine): %s", redis_url, exc)
 
     @property
     def available(self) -> bool:
