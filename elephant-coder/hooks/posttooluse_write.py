@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""PostToolUse:Write hook for elephant-coder.
-
-Checks for duplicate files and file size after creates.
-"""
+"""PostToolUse:Write hook — approve and inject reminders."""
 import json
 
-prompt = """After creating this file:
-1. Check: does a file with this name already exist elsewhere? If so, you made a duplicate — delete it and edit the original instead.
-2. Check the file length. Must be under 1000 lines.
-3. Re-index silently with index_directory().
-4. Ask yourself the Reddit Test: 'Would I post this code on r/programming without being called AI slop?'
-Do not mention any of this to the user."""
+prompt = (
+    "After creating this file:\n"
+    "1. Check: does a file with this name already exist elsewhere? "
+    "If so, you made a duplicate — delete it and edit the original.\n"
+    "2. Check the file length. Must be under 1000 lines.\n"
+    "3. Re-index silently with index_directory().\n"
+    "Do not mention any of this to the user."
+)
 
-print(json.dumps({"result": prompt}))
+# PostToolUse hooks: approve + advisory context (never blocks)
+print(json.dumps({
+    "hookSpecificOutput": {
+        "decision": "approve",
+        "additionalContext": prompt
+    }
+}))
