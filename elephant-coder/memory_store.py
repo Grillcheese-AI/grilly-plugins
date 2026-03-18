@@ -369,6 +369,55 @@ class MemoryStore:
         # Write-through to Redis
         self._cache.put_entry(entry)
 
+    def upsert_batch(self, entries: list[MemoryEntry]) -> None:
+        """Insert or replace multiple entries in a single transaction."""
+        if not entries:
+            return
+        now = time.time()
+        cur = self._conn.cursor()
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+            for entry in entries:
+                if entry.created == 0.0:
+                    entry.created = now
+                if entry.freshness == 0.0:
+                    entry.freshness = now
+                cur.execute("DELETE FROM memories_fts WHERE memory_id = ?", (entry.memory_id,))
+                cur.execute(
+                    """INSERT OR REPLACE INTO memories
+                        (memory_id, file_path, symbol_name, kind, summary, keywords,
+                         dependencies, line_count, access_count, relevance_score, freshness,
+                         file_mtime, created, compression_level, is_stale)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (entry.memory_id, entry.file_path, entry.symbol_name,
+                     entry.kind, entry.summary, json.dumps(entry.keywords),
+                     json.dumps(entry.dependencies), entry.line_count,
+                     entry.access_count, entry.relevance_score, entry.freshness,
+                     entry.file_mtime, entry.created, entry.compression_level,
+                     int(entry.is_stale)),
+                )
+                cur.execute(
+                    "INSERT INTO memories_fts (memory_id, symbol_name, summary, keywords) VALUES (?, ?, ?, ?)",
+                    (entry.memory_id, entry.symbol_name, entry.summary, " ".join(entry.keywords)),
+                )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        # Batch Redis pipeline
+        if self._cache.available:
+            try:
+                pipe = self._cache._r.pipeline()
+                for entry in entries:
+                    key = self._cache._key("mem", entry.memory_id)
+                    pipe.setex(key, self._cache._ttl, json.dumps(_entry_to_dict(entry)))
+                    fkey = self._cache._key("file", self._cache._file_hash(entry.file_path))
+                    pipe.sadd(fkey, entry.memory_id)
+                    pipe.expire(fkey, self._cache._ttl)
+                pipe.execute()
+            except Exception:
+                pass
+
     def get(self, memory_id: str) -> MemoryEntry | None:
         """Fetch a single memory by ID."""
         # Check Redis first
