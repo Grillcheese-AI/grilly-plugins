@@ -23,6 +23,8 @@ from pathlib import Path
 from consolidator import consolidate, detect_stale, should_consolidate
 from indexer import index_file
 from link_graph import resolve_python_imports, resolve_cpp_includes, detect_shader_dispatches, resolve_module_to_path
+from mental_model import generate_mental_model
+from framework_detector import detect_frameworks
 from mcp.server.fastmcp import FastMCP
 from memory_store import MemoryEntry, MemoryStore, make_memory_id
 from retriever import format_results, recall, recall_file
@@ -420,6 +422,84 @@ def update_settings(
         current["auto_test_after_edit"] = auto_test_after_edit
     path = save_settings(_detect_project_root(), current)
     return f"Settings updated and saved to {path}"
+
+
+@mcp.tool()
+def project_overview() -> str:
+    """Generate a comprehensive project mental model.
+
+    Returns the project's architecture, key files, hub nodes (most-imported files),
+    recent changes, and framework detection. Called automatically at session start
+    to give Claude immediate project context.
+    """
+    store = _get_store()
+    project_root = _detect_project_root()
+    model = generate_mental_model(store, project_root)
+
+    # Framework detection
+    frameworks = detect_frameworks(project_root)
+    if frameworks:
+        model += "\n### Detected Frameworks\n"
+        for fw in frameworks:
+            model += f"\n- **{fw['name']}** ({fw['detected_as']})"
+            if fw.get("github"):
+                model += f" — {fw['github']}"
+        model += "\n"
+
+    return model
+
+
+@mcp.tool()
+def what_broke(since: str = "1 day ago") -> str:
+    """Show what changed semantically since the last session.
+
+    Compares current file state against indexed memories to find
+    files that changed. For each changed file, shows what symbols
+    were affected and which other files depend on them.
+
+    Args:
+        since: Git time expression (default: "1 day ago")
+    """
+    store = _get_store()
+    project_root = _detect_project_root()
+
+    try:
+        result = subprocess.run(
+            ["git", "log", f"--since={since}", "--name-only", "--pretty=format:", "--diff-filter=ACMR"],
+            capture_output=True, text=True, cwd=project_root, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        return f"Could not run git: {exc}"
+
+    if result.returncode != 0:
+        return f"git log failed: {result.stderr.strip()}"
+
+    changed_files = list(dict.fromkeys(f.strip() for f in result.stdout.strip().split('\n') if f.strip()))
+    if not changed_files:
+        return f"No files changed since {since}."
+
+    lines = [f"## What Changed (since {since})", ""]
+
+    for rel_path in changed_files[:20]:
+        abs_path = str(Path(project_root) / rel_path)
+        file_entries = store.search_by_file(abs_path)
+        inbound = store.get_inbound_links(abs_path)
+
+        symbols = [e.symbol_name for e in file_entries if e.kind != "module"][:5]
+        stale = any(e.is_stale for e in file_entries)
+
+        line = f"- **{rel_path}**"
+        if stale:
+            line += " [STALE]"
+        if symbols:
+            line += f": {', '.join(symbols)}"
+        lines.append(line)
+
+        if inbound:
+            dependents = [os.path.relpath(l["source_path"], project_root) for l in inbound[:5]]
+            lines.append(f"  Impact: {len(inbound)} files depend on this ({', '.join(dependents)})")
+
+    return "\n".join(lines)
 
 
 @mcp.tool()

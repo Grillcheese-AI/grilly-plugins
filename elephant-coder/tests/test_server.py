@@ -19,3 +19,12 @@ def test_update_settings_exists():
     """update_settings should be importable from server module."""
     from server import update_settings
     assert callable(update_settings)
+
+
+def test_project_overview_exists():
+    from server import project_overview
+    assert callable(project_overview)
+
+def test_what_broke_exists():
+    from server import what_broke
+    assert callable(what_broke)
