@@ -28,3 +28,11 @@ def test_project_overview_exists():
 def test_what_broke_exists():
     from server import what_broke
     assert callable(what_broke)
+
+def test_get_tasks_exists():
+    from server import get_tasks
+    assert callable(get_tasks)
+
+def test_add_task_exists():
+    from server import add_task
+    assert callable(add_task)

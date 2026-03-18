@@ -12,6 +12,7 @@ Register with Claude Code:
     claude mcp add --transport stdio elephant-coder -- python server.py
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -29,6 +30,8 @@ from mcp.server.fastmcp import FastMCP
 from memory_store import MemoryEntry, MemoryStore, make_memory_id
 from retriever import format_results, recall, recall_file
 from settings import load_settings, save_settings
+from task_manager import TaskManager
+from scope_guard import check_file_size, check_duplicate_file
 
 # Logging to stderr only (stdout reserved for MCP stdio transport)
 logging.basicConfig(
@@ -85,6 +88,18 @@ def _normalize_path(path: str) -> str:
 def _load_settings() -> dict:
     """Load settings for the current project."""
     return load_settings(_detect_project_root())
+
+
+_task_mgr: TaskManager | None = None
+
+def _get_task_manager() -> TaskManager:
+    global _task_mgr
+    if _task_mgr is None:
+        project_root = _detect_project_root()
+        db_dir = Path.home() / ".elephant-coder" / hashlib.sha256(project_root.encode()).hexdigest()[:12]
+        db_dir.mkdir(parents=True, exist_ok=True)
+        _task_mgr = TaskManager(str(db_dir))
+    return _task_mgr
 
 
 def _extract_and_store_links(store: MemoryStore, fpath: Path, project_root: Path) -> None:
@@ -500,6 +515,54 @@ def what_broke(since: str = "1 day ago") -> str:
             lines.append(f"  Impact: {len(inbound)} files depend on this ({', '.join(dependents)})")
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+def get_tasks() -> str:
+    """Get the current project task list with objectives and status."""
+    return _get_task_manager().format_task_list()
+
+@mcp.tool()
+def add_task(description: str, scope: str = "", priority: str = "medium") -> str:
+    """Add a new task to the project task list.
+
+    Args:
+        description: What needs to be done
+        scope: Comma-separated file paths/directories this task covers
+        priority: low, medium, or high
+    """
+    tm = _get_task_manager()
+    scope_list = [s.strip() for s in scope.split(",") if s.strip()] if scope else []
+    tid = tm.add_task(description, scope=scope_list, priority=priority)
+    return f"Task {tid} created: {description}"
+
+@mcp.tool()
+def update_task(task_id: str, status: str = "", notes: str = "") -> str:
+    """Update a task's status or notes.
+
+    Args:
+        task_id: Task ID (e.g., T-001)
+        status: pending, in_progress, or completed
+        notes: Additional notes
+    """
+    tm = _get_task_manager()
+    s = status if status else None
+    n = notes if notes else None
+    if tm.update_task(task_id, status=s, notes=n):
+        return f"Task {task_id} updated."
+    return f"Task {task_id} not found."
+
+@mcp.tool()
+def set_project_objectives(objectives: str) -> str:
+    """Set the project's main objectives.
+
+    Args:
+        objectives: Pipe-separated list (e.g., "Build GPU framework|PyTorch API compatibility")
+    """
+    tm = _get_task_manager()
+    obj_list = [o.strip() for o in objectives.split("|") if o.strip()]
+    tm.set_objectives(obj_list)
+    return f"Set {len(obj_list)} objectives."
 
 
 @mcp.tool()
