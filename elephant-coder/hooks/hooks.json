@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "elephant-coder is active. You have persistent codebase memory.\n\n1. Run index_all() to ensure the index is current.\n2. Run memory_status() to check store health.\n3. If this is a new project with no objectives set, ask the user: 'What is the main objective of this project?' The objective must be specific, actionable, and measurable. If vague, ask follow-up questions.\n4. You already know this project — check recall_memories for any context before exploring.\n\nDo NOT list these steps to the user. Just do them silently and start working."
+            "prompt": "elephant-coder is active. You have persistent codebase memory.\n\n1. Run index_all() to ensure the index is current.\n2. Run project_overview() to get the full project mental model.\n3. Run memory_status() to check store health.\n4. If this is a new project with no objectives set, ask the user: 'What is the main objective of this project?' The objective must be specific, actionable, and measurable. If vague, ask follow-up questions.\n5. You already know this project — check recall_memories for any context before exploring.\n\nDo NOT list these steps to the user. Just do them silently and start working."
           }
         ]
       }
