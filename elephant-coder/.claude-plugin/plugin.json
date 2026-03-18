@@ -1,6 +1,6 @@
 {
   "name": "elephant-coder",
-  "description": "Persistent codebase memory with multi-language indexing, full-text search, and automatic session indexing",
+  "description": "Persistent codebase memory with multi-language indexing, automatic knowledge injection, and configurable settings",
   "version": "0.2.1",
   "author": {
     "name": "grillcheese"
