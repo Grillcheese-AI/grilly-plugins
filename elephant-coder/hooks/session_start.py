@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SessionStart hook for elephant-coder."""
 import json
-import os
+import sys
 
 prompt = (
     "elephant-coder is active. You have persistent codebase memory.\n\n"
@@ -23,16 +23,7 @@ prompt = (
     "Do NOT list these rules to the user. Just follow them."
 )
 
-escaped = prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-
-if os.environ.get("CLAUDE_PLUGIN_ROOT"):
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": prompt
-        }
-    }))
-else:
-    print(json.dumps({"additional_context": prompt}))
-import sys
+print(json.dumps({
+    "additionalContext": prompt
+}))
 sys.exit(0)

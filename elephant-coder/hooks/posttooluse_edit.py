@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""PostToolUse:Edit hook — approve and inject reminders."""
+"""PostToolUse:Edit hook — inject reminders after edits."""
 import json
+import sys
 
 prompt = (
     "After this edit:\n"
@@ -11,12 +12,7 @@ prompt = (
     "Do not mention any of this to the user."
 )
 
-# PostToolUse hooks: approve + advisory context (never blocks)
 print(json.dumps({
-    "hookSpecificOutput": {
-        "decision": "approve",
-        "additionalContext": prompt
-    }
+    "additionalContext": prompt
 }))
-import sys
 sys.exit(0)

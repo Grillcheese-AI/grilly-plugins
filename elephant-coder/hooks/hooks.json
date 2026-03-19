@@ -3,11 +3,11 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py",
+            "command": "python ${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py",
             "timeout": 10
           }
         ]
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse_read.py",
+            "command": "python ${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse_read.py",
             "timeout": 5
           }
         ]
@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/posttooluse_edit.py",
+            "command": "python ${CLAUDE_PLUGIN_ROOT}/hooks/posttooluse_edit.py",
             "timeout": 5
           }
         ]
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/posttooluse_write.py",
+            "command": "python ${CLAUDE_PLUGIN_ROOT}/hooks/posttooluse_write.py",
             "timeout": 5
           }
         ]
