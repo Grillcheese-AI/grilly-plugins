@@ -7,3 +7,5 @@ dist/
 build/
 .claude/settings.local.json
 elephant-coder/uv.lock
+.pytest_cache
+.venv

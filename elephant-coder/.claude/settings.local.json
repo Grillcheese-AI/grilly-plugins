@@ -1,13 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "mcp__plugin_elephant-coder_elephant-coder__memory_status",
-      "mcp__plugin_elephant-coder_elephant-coder__recall_memories",
-      "mcp__plugin_elephant-coder_elephant-coder__recall_file_memories",
-      "mcp__plugin_elephant-coder_elephant-coder__search_symbols",
-      "mcp__plugin_elephant-coder_elephant-coder__explore_structure",
-      "mcp__plugin_elephant-coder_elephant-coder__summarize_directory",
-      "mcp__plugin_elephant-coder_elephant-coder__recent_changes"
+      "mcp__plugin_elephant-coder_elephant-coder__*",
+      "mcp__elephant-coder__*"
     ]
   },
   "enableAllProjectMcpServers": true,

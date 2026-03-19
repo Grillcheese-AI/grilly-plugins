@@ -111,7 +111,7 @@ claude plugin add grillcheese-ai/grilly-plugins/elephant-coder
 
 ### Requirements
 
-- Python 3.10+
+- Python 3.12+
 - [uv](https://docs.astral.sh/uv/) (used to run the MCP server)
 - Redis (optional, for write-through caching layer)
 

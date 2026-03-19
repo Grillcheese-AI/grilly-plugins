@@ -26,4 +26,4 @@ prompt = (
 print(json.dumps({
     "additionalContext": prompt
 }))
-sys.exit(0)
+# sys.exit(0)
