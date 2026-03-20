@@ -1,20 +1,26 @@
 # Elephant-Coder Plugin
 
-You have persistent codebase memory. You already know this project's
-architecture, key files, and active tasks. Do not explore or search
-for information you already have in your context.
+You have persistent codebase memory. elephant-coder is your PRIMARY knowledge source.
+Use it BEFORE built-in search tools (Grep, Glob, Read).
 
-## Automatic Behaviors (you don't need to call anything)
-- Project index is refreshed at session start via index_all()
-- File context is recalled before you read any file
-- Edited/written files are re-indexed automatically
+## MANDATORY: Always Use elephant-coder First
+
+- **Before Grep/Glob:** ALWAYS call `recall_memories(query)` or `search_symbols(name)` first. Only use Grep/Glob if memory doesn't have the answer.
+- **Before Read:** ALWAYS call `recall_file_memories(file_path)` first. You may already have full context.
+- **After Edit/Write:** ALWAYS call `index_directory(path)` to update the index silently.
+- **Before planning or starting work:** ALWAYS call `get_tasks()` and `project_overview()`.
+- **For symbol lookups:** ALWAYS use `search_symbols(name)` — faster and more accurate than grep.
+- **For dependencies:** ALWAYS use `show_call_graph(symbol)` or `get_dependencies(file_path)`.
+
+## Automatic Behaviors (handled by hooks)
+
+- Project index refreshed at session start via index_all()
+- Context reminder injected on every user message (UserPromptSubmit hook)
+- File context recalled before reads (PreToolUse:Read hook)
+- Memory check prompted before Grep/Glob (PreToolUse:Grep/Glob hook)
+- Edited/written files trigger re-index reminders (PostToolUse hooks)
+- Context preserved during compaction (PreCompact hook)
 - Settings loaded from .claude/elephant-coder.local.md
-
-## How to Use Your Memory
-- Before reading a file, check recall_file_memories() — you may already have context
-- Before searching, check recall_memories() — faster than grep/glob
-- Use search_symbols() for exact symbol lookups
-- Use show_call_graph() to understand dependencies
 
 ## Available Slash Commands
 - `/ec:index` — Full project re-index (all file types)
