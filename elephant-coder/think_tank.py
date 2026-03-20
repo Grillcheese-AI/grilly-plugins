@@ -204,7 +204,7 @@ class ThinkTank:
             context_lines.append(f"{sender}: {content}")
 
         user_prompt = (
-            f"Meeting context:\n{'chr(10)'.join(context_lines)}\n\n"
+            "Meeting context:\n" + "\n".join(context_lines) + "\n\n"
             f"Latest message from the user/facilitator:\n{user_message}\n\n"
             f"Respond concisely from your {exec_info.get('role', 'expert')} perspective. "
             f"Be specific and actionable. Keep it under 200 words."

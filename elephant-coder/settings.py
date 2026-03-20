@@ -18,7 +18,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # --- Storage ---
     "max_memories": 50_000,
     "relevance_threshold": 0.1,
-    "redis_url": "redis://localhost:6380",
+    "redis_url": "redis://localhost:6379",
     "redis_ttl": 365 * 24 * 3600,
     # --- Vector search ---
     "vector_search": {

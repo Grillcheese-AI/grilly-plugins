@@ -283,7 +283,7 @@ Settings are per-project in `.claude/elephant-coder.local.md` (YAML frontmatter)
 |---------|---------|-------------|
 | `max_memories` | 50,000 | Maximum memories in the store |
 | `relevance_threshold` | 0.1 | Minimum relevance for search results |
-| `redis_url` | `redis://localhost:6380` | Redis URL (primary store) |
+| `redis_url` | `redis://localhost:6379` | Redis URL (primary store) |
 | `redis_ttl` | 1 year | Redis entry TTL |
 
 ### Vector Search

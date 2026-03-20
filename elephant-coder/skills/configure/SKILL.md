@@ -12,7 +12,7 @@ Interactively configure elephant-coder for the current project.
 2. Present the user with the current configuration grouped by category:
 
    **Storage**
-   - Redis URL (default: redis://localhost:6380)
+   - Redis URL (default: redis://localhost:6379)
    - Redis TTL
    - Max memories (default: 50000)
 

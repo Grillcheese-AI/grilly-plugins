@@ -349,7 +349,7 @@ class MemoryStore:
         self._init_schema()
 
         # Redis — primary store for reads, SQLite is durable fallback
-        r_url = redis_url or os.environ.get("ELEPHANT_CODER_REDIS_URL", "redis://localhost:6380")
+        r_url = redis_url or os.environ.get("ELEPHANT_CODER_REDIS_URL", "redis://localhost:6379")
         ttl = int(os.environ.get("ELEPHANT_CODER_REDIS_TTL", str(RedisCache.DEFAULT_TTL)))
         self._cache = RedisCache(r_url, _project_hash(project_root), ttl=ttl)
 

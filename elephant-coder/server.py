@@ -49,6 +49,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("elephant-coder")
 
+# Startup diagnostics
+logger.info("CLAUDE_PROJECT_DIR=%s", os.environ.get("CLAUDE_PROJECT_DIR", "NOT SET"))
+logger.info("CWD=%s", os.getcwd())
+logger.info("Python=%s", sys.executable)
+logger.info("Server module=%s", __file__)
+
 # ------------------------------------------------------------------
 # Server setup
 # ------------------------------------------------------------------
@@ -659,7 +665,7 @@ def update_settings(
     Args:
         max_memories: Maximum memories in the store (default: 50000)
         relevance_threshold: Minimum relevance score for search results (default: 0.1)
-        redis_url: Redis URL (default: redis://localhost:6380)
+        redis_url: Redis URL (default: redis://localhost:6379)
         skip_dirs: Directories to skip during indexing
         scope_guard: Enable scope guard (block untracked changes)
         auto_test_after_edit: Prompt to run tests after edits
@@ -2176,7 +2182,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Elephant-Coder MCP Server")
-    parser.add_argument("--redis-url", default=None, help="Redis URL (default: redis://localhost:6380)")
+    parser.add_argument("--redis-url", default=None, help="Redis URL (default: redis://localhost:6379)")
     args = parser.parse_args()
 
     if args.redis_url:
