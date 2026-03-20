@@ -571,6 +571,30 @@ _ALL_PATTERNS = [
 
 
 @mcp.tool()
+def set_project_root(path: str) -> str:
+    """Set the project root directory for this session.
+
+    IMPORTANT: Call this FIRST before any other tool if you know the project path.
+    Claude Code knows the working directory from its environment — pass it here
+    so elephant-coder indexes and recalls from the correct project.
+
+    Args:
+        path: Absolute path to the project root directory
+    """
+    global _project_root_override, _stores, _vector_stores, _module_systems
+    resolved = str(Path(path).resolve())
+    if not Path(resolved).is_dir():
+        return f"Error: {path} is not a directory."
+    _project_root_override = resolved
+    # Clear caches so they reinitialize for the new project
+    _stores.clear()
+    _vector_stores.clear()
+    _module_systems.clear()
+    logger.info("Project root set to: %s", resolved)
+    return f"Project root set to: {resolved}"
+
+
+@mcp.tool()
 def index_all(force: bool = False) -> str:
     """Index the entire project — all supported file types in one call.
 

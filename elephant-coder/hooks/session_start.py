@@ -83,6 +83,7 @@ prompt = (
     "elephant-coder is active. You have persistent codebase memory.\n"
     "elephant-coder is your PRIMARY knowledge source — use it BEFORE grep, glob, or file reads.\n\n"
     "STARTUP SEQUENCE (execute in order):\n"
+    "0. Run set_project_root(path) with the user's ACTUAL working directory (from your environment, NOT the plugin directory). This is CRITICAL.\n"
     "1. Run index_all() to ensure the index is current.\n"
     "2. Run project_overview() to get the full project mental model.\n"
     "3. Run get_tasks() to see active tasks and objectives.\n"
