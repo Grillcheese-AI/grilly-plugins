@@ -138,3 +138,4 @@ prompt += (
 print(json.dumps({
     "additionalContext": prompt
 }))
+os.exit()
