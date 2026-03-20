@@ -1,12 +1,18 @@
 """
-Retriever for elephant-coder — pattern completion via FTS5 search.
+Hybrid retriever for elephant-coder — FTS5 keyword + vector semantic search.
+
+Combines two retrieval strategies:
+1. BM25 keyword search via SQLite FTS5 (exact term matching)
+2. Semantic vector search via Qdrant/local numpy (meaning matching)
+
+Results are fused using Reciprocal Rank Fusion (RRF) to get the best of both.
+This solves the "empty response" problem where keyword search fails on
+semantically related but lexically different queries (e.g., "authentication"
+matching "verify_token").
 
 Analogous to CA3 pattern completion in nn/hippocampal.py: given a partial
-cue (query), retrieve full memory entries using BM25-ranked search, then
+cue (query), retrieve full memory entries using ranked search, then
 strengthen accessed memories (Hebbian learning via access_count increment).
-
-Relevance scoring mirrors CognitiveFeatures.consolidation_priority:
-    relevance = recency_weight * recency + frequency_weight * log(1 + access_count)
 """
 
 import logging
@@ -16,6 +22,9 @@ import time
 from memory_store import MemoryEntry, MemoryStore
 
 logger = logging.getLogger("elephant-coder.retriever")
+
+# RRF constant — higher values favor lower-ranked results more
+RRF_K = 60
 
 
 def compute_relevance(access_count: int, last_access: float, created: float) -> float:
@@ -30,21 +39,73 @@ def compute_relevance(access_count: int, last_access: float, created: float) -> 
     return round(recency * 0.6 + frequency * 0.4, 4)
 
 
+def _rrf_merge(
+    fts_results: list[MemoryEntry],
+    vector_ids: list[str],
+    store: MemoryStore,
+    k: int = RRF_K,
+) -> list[MemoryEntry]:
+    """Reciprocal Rank Fusion: merge keyword and vector results.
+
+    Each result gets score = 1/(k + rank). Results appearing in both lists
+    get summed scores, so they rank higher.
+    """
+    scores: dict[str, float] = {}
+    entries: dict[str, MemoryEntry] = {}
+
+    # Score FTS results by rank
+    for rank, entry in enumerate(fts_results):
+        mid = entry.memory_id
+        scores[mid] = scores.get(mid, 0.0) + 1.0 / (k + rank)
+        entries[mid] = entry
+
+    # Score vector results by rank, fetch entries we don't have yet
+    for rank, mid in enumerate(vector_ids):
+        scores[mid] = scores.get(mid, 0.0) + 1.0 / (k + rank)
+        if mid not in entries:
+            entry = store.get(mid)
+            if entry:
+                entries[mid] = entry
+
+    # Sort by fused score descending
+    ranked_ids = sorted(scores.keys(), key=lambda mid: scores[mid], reverse=True)
+    return [entries[mid] for mid in ranked_ids if mid in entries]
+
+
 def recall(
     store: MemoryStore,
     query: str,
     limit: int = 5,
     kind: str | None = None,
     relevance_threshold: float = 0.0,
+    vector_store=None,
 ) -> list[MemoryEntry]:
-    """Search memories and return ranked results.
+    """Hybrid search: FTS5 keywords + vector semantics, fused with RRF.
 
-    Performs FTS5 search (with Redis cache), optionally filters by kind,
-    batch-updates access stats (Hebbian strengthening), and uses lightweight
-    relevance updates instead of full upserts.
+    When vector_store is available, both keyword and semantic results are
+    retrieved and merged. When unavailable, falls back to FTS5 only.
     """
-    results = store.search_fts(query, limit=limit * 3)
+    fetch_count = limit * 3
 
+    # 1. FTS5 keyword search
+    fts_results = store.search_fts(query, limit=fetch_count)
+
+    # 2. Vector semantic search (if available)
+    vector_ids: list[str] = []
+    if vector_store is not None:
+        try:
+            vector_hits = vector_store.search(query, limit=fetch_count)
+            vector_ids = [hit.memory_id for hit in vector_hits]
+        except Exception as exc:
+            logger.warning("Vector search failed, using FTS only: %s", exc)
+
+    # 3. Merge results
+    if vector_ids:
+        results = _rrf_merge(fts_results, vector_ids, store)
+    else:
+        results = fts_results
+
+    # 4. Filter
     if kind:
         results = [r for r in results if r.kind == kind]
 
@@ -53,7 +114,7 @@ def recall(
 
     results = results[:limit]
 
-    # Batch Hebbian strengthening
+    # 5. Hebbian strengthening
     now = time.time()
     ids_to_touch = [entry.memory_id for entry in results]
     store.touch_batch(ids_to_touch)
@@ -64,7 +125,6 @@ def recall(
         entry.relevance_score = compute_relevance(
             entry.access_count, entry.freshness, entry.created
         )
-        # Lightweight relevance update (avoids FTS5 delete+insert)
         store.update_relevance(entry.memory_id, entry.relevance_score)
 
     return results

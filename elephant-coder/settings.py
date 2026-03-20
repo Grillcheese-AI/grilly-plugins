@@ -15,14 +15,30 @@ from typing import Any
 import yaml
 
 DEFAULT_SETTINGS: dict[str, Any] = {
+    # --- Storage ---
     "max_memories": 50_000,
     "relevance_threshold": 0.1,
     "redis_url": "redis://localhost:6380",
     "redis_ttl": 365 * 24 * 3600,
+    # --- Vector search ---
+    "vector_search": {
+        "enabled": True,
+        "qdrant_url": None,  # e.g. "http://localhost:6333" — None = local numpy fallback
+        "encoder_model": "all-MiniLM-L6-v2",
+    },
+    # --- Project config ---
+    "project": {
+        "framework": None,  # e.g. "grilly", "django", "react" — auto-detected if None
+        "github_repo": None,  # e.g. "grillcheese/elephant-coder"
+        "knowledge_docs_path": "docs/project_knowledge",
+        "business_docs_path": "docs/business",
+    },
+    # --- Indexing ---
     "skip_dirs": [".venv", "node_modules", "__pycache__", "dist", "build", ".git", ".eggs"],
     "frameworks": [],
     "auto_test_after_edit": True,
     "scope_guard": True,
+    # --- External validation ---
     "external_validation": {
         "enabled": False,
         "openrouter_api_key": None,
@@ -31,6 +47,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "audit_completed_tasks": True,
         "require_approval_on_issues": True,
     },
+    # --- User profile (opt-in) ---
+    "user_profile": {
+        "enabled": False,  # must be explicitly enabled by user
+        "auto_observe": True,  # silently observe user behavior
+        "decay_days": 90,  # reduce confidence of stale observations after N days
+    },
+    # --- RSS feeds ---
     "rss_feeds": [
         "https://hackernoon.com/feed",
         "https://globalnews.ca/feed/",

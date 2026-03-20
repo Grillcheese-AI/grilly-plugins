@@ -1,0 +1,219 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Verify imports
+        run: |
+          uv run python -c "from memory_store import MemoryStore, MemoryEntry"
+          uv run python -c "from vector_store import VectorStore"
+          uv run python -c "from retriever import recall, recall_file"
+          uv run python -c "from indexer import index_file"
+          uv run python -c "import server"
+
+      - name: Test memory store
+        env:
+          ELEPHANT_CODER_REDIS_URL: redis://localhost:6380
+        run: |
+          uv run python -c "
+          from memory_store import MemoryStore, MemoryEntry, make_memory_id
+          import tempfile, os
+
+          with tempfile.TemporaryDirectory() as tmpdir:
+              store = MemoryStore(tmpdir, redis_url='redis://localhost:6380')
+
+              # Test upsert + retrieve
+              entry = MemoryEntry(
+                  memory_id=make_memory_id('test.py', 'foo', 'function'),
+                  file_path='test.py', symbol_name='foo', kind='function',
+                  summary='A test function', keywords=['test', 'foo'],
+              )
+              store.upsert(entry)
+              assert store.count() == 1
+
+              # Test FTS search
+              results = store.search_fts('test function')
+              assert len(results) >= 1
+
+              # Test symbol search
+              results = store.search_by_symbol('foo')
+              assert len(results) == 1
+
+              # Test file search
+              results = store.search_by_file('test.py')
+              assert len(results) == 1
+
+              # Test delete
+              store.delete(entry.memory_id)
+              assert store.count() == 0
+
+              store.close()
+              print('All memory store tests passed')
+          "
+
+      - name: Test indexer
+        run: |
+          uv run python -c "
+          from indexer import index_file
+          entries = index_file('server.py')
+          assert len(entries) > 0, 'No entries from server.py'
+          print(f'Indexed server.py: {len(entries)} symbols')
+
+          entries = index_file('memory_store.py')
+          assert len(entries) > 0
+          print(f'Indexed memory_store.py: {len(entries)} symbols')
+          print('All indexer tests passed')
+          "
+
+      - name: Test retriever
+        run: |
+          uv run python -c "
+          from memory_store import MemoryStore, MemoryEntry, make_memory_id
+          from retriever import recall, recall_file, format_results
+          import tempfile
+
+          with tempfile.TemporaryDirectory() as tmpdir:
+              store = MemoryStore(tmpdir)
+
+              # Seed data
+              for i, name in enumerate(['auth_handler', 'validate_token', 'user_login']):
+                  entry = MemoryEntry(
+                      memory_id=make_memory_id('auth.py', name, 'function'),
+                      file_path='auth.py', symbol_name=name, kind='function',
+                      summary=f'Handles {name.replace(\"_\", \" \")}',
+                      keywords=[name, 'auth', 'security'],
+                  )
+                  store.upsert(entry)
+
+              # Test keyword recall
+              results = recall(store, 'auth', limit=3)
+              assert len(results) > 0, 'No results for auth query'
+
+              # Test file recall
+              results = recall_file(store, 'auth.py')
+              assert len(results) == 3
+
+              # Test format
+              text = format_results(results)
+              assert 'auth_handler' in text
+
+              store.close()
+              print('All retriever tests passed')
+          "
+
+      - name: Test hooks
+        run: |
+          echo '{}' | uv run python hooks/session_start.py | python -c "import sys,json; d=json.load(sys.stdin); assert 'additionalContext' in d; print('session_start OK')"
+          echo '{}' | uv run python hooks/userpromptsubmit.py | python -c "import sys,json; d=json.load(sys.stdin); assert 'additionalContext' in d; print('userpromptsubmit OK')"
+          echo '{}' | uv run python hooks/precompact.py | python -c "import sys,json; d=json.load(sys.stdin); assert 'additionalContext' in d; print('precompact OK')"
+          echo '{}' | uv run python hooks/pretooluse_read.py | python -c "import sys,json; d=json.load(sys.stdin); assert d.get('decision')=='approve'; print('pretooluse_read OK')"
+          echo '{}' | uv run python hooks/pretooluse_search.py | python -c "import sys,json; d=json.load(sys.stdin); assert d.get('decision')=='approve'; print('pretooluse_search OK')"
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Check syntax
+        run: |
+          uv run python -m py_compile server.py
+          uv run python -m py_compile memory_store.py
+          uv run python -m py_compile indexer.py
+          uv run python -m py_compile retriever.py
+          uv run python -m py_compile vector_store.py
+          uv run python -m py_compile settings.py
+          uv run python -m py_compile consolidator.py
+          echo "All files compile OK"
+
+  plugin-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate plugin.json
+        run: |
+          python -c "
+          import json
+          with open('.claude-plugin/plugin.json') as f:
+              data = json.load(f)
+          assert 'name' in data
+          assert 'version' in data
+          print(f'Plugin: {data[\"name\"]} v{data[\"version\"]}')
+          "
+
+      - name: Validate hooks.json
+        run: |
+          python -c "
+          import json
+          with open('hooks/hooks.json') as f:
+              data = json.load(f)
+          hooks = data['hooks']
+          expected = ['SessionStart', 'UserPromptSubmit', 'PreCompact', 'PreToolUse', 'PostToolUse']
+          for event in expected:
+              assert event in hooks, f'Missing hook event: {event}'
+          print(f'All {len(expected)} hook events configured')
+          "
+
+      - name: Validate skills exist
+        run: |
+          for skill in index recall status graph recent ingest configure feeds persona ensemble second-opinion cicd; do
+            if [ -f "skills/$skill/SKILL.md" ]; then
+              echo "✓ $skill"
+            else
+              echo "✗ $skill MISSING" && exit 1
+            fi
+          done
+
+      - name: Validate commands exist
+        run: |
+          for cmd in index recall status graph recent ingest configure feeds persona ensemble second-opinion cicd; do
+            if [ -f "commands/$cmd.md" ]; then
+              echo "✓ $cmd"
+            else
+              echo "✗ $cmd MISSING" && exit 1
+            fi
+          done

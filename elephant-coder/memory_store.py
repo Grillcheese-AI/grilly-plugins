@@ -1,8 +1,14 @@
 """
-SQLite-backed memory store for elephant-coder with optional Redis cache.
+Redis-primary memory store for elephant-coder with SQLite durable fallback.
 
 Inspired by CapsuleMemory (backend/capsule_transformer.py:91-155) and the
 hippocampal circular buffer pattern from nn/memory.py MemoryWrite.
+
+Architecture:
+- Redis is the PRIMARY store for reads (fast key-value, symbol, kind lookups)
+- SQLite is the DURABLE FALLBACK (always written to, used when Redis is down)
+- FTS5 lives in SQLite (no Redis equivalent without RediSearch module)
+- Writes go to Redis first, then SQLite for durability
 
 Each memory is a compressed "capsule" of code context with cognitive metadata
 for relevance-based retrieval and lifecycle management.
@@ -142,6 +148,9 @@ class RedisCache:
             self._r.expire(fkey, self._ttl)
         except Exception:
             pass
+        # Update symbol and kind indexes
+        self.put_symbol(entry)
+        self.put_kind(entry)
 
     def get_entry(self, memory_id: str) -> MemoryEntry | None:
         if not self._available:
@@ -154,7 +163,8 @@ class RedisCache:
             pass
         return None
 
-    def delete_entry(self, memory_id: str, file_path: str | None = None) -> None:
+    def delete_entry(self, memory_id: str, file_path: str | None = None,
+                     symbol_name: str | None = None, kind: str | None = None) -> None:
         if not self._available:
             return
         try:
@@ -162,6 +172,12 @@ class RedisCache:
             if file_path:
                 fkey = self._key("file", self._file_hash(file_path))
                 self._r.srem(fkey, memory_id)
+            if symbol_name:
+                self._r.srem(self._key("sym", symbol_name), memory_id)
+                if kind:
+                    self._r.srem(self._key("sym", f"{symbol_name}:{kind}"), memory_id)
+            if kind:
+                self._r.srem(self._key("kind", kind), memory_id)
         except Exception:
             pass
 
@@ -191,6 +207,84 @@ class RedisCache:
                     pipe.delete(self._key("mem", mid))
                 pipe.delete(fkey)
                 pipe.execute()
+        except Exception:
+            pass
+
+    # --- Symbol index ---
+
+    def put_symbol(self, entry: MemoryEntry) -> None:
+        """Index an entry by symbol_name for direct lookup."""
+        if not self._available:
+            return
+        try:
+            # Exact name -> set of memory_ids
+            skey = self._key("sym", entry.symbol_name)
+            self._r.sadd(skey, entry.memory_id)
+            self._r.expire(skey, self._ttl)
+            # Kind-specific: sym:{name}:{kind} -> set of memory_ids
+            skkey = self._key("sym", f"{entry.symbol_name}:{entry.kind}")
+            self._r.sadd(skkey, entry.memory_id)
+            self._r.expire(skkey, self._ttl)
+        except Exception:
+            pass
+
+    def get_symbol(self, name: str, kind: str | None = None) -> list[str] | None:
+        """Get memory_ids for a symbol name. Returns None if not in cache."""
+        if not self._available:
+            return None
+        try:
+            if kind:
+                skey = self._key("sym", f"{name}:{kind}")
+            else:
+                skey = self._key("sym", name)
+            members = self._r.smembers(skey)
+            return list(members) if members else None
+        except Exception:
+            return None
+
+    def delete_symbol(self, entry: MemoryEntry) -> None:
+        """Remove an entry from symbol indexes."""
+        if not self._available:
+            return
+        try:
+            skey = self._key("sym", entry.symbol_name)
+            self._r.srem(skey, entry.memory_id)
+            skkey = self._key("sym", f"{entry.symbol_name}:{entry.kind}")
+            self._r.srem(skkey, entry.memory_id)
+        except Exception:
+            pass
+
+    # --- Kind index ---
+
+    def put_kind(self, entry: MemoryEntry) -> None:
+        """Index an entry by kind for filtered lookup."""
+        if not self._available:
+            return
+        try:
+            kkey = self._key("kind", entry.kind)
+            self._r.sadd(kkey, entry.memory_id)
+            self._r.expire(kkey, self._ttl)
+        except Exception:
+            pass
+
+    def get_kind(self, kind: str) -> list[str] | None:
+        """Get memory_ids for a kind. Returns None if not in cache."""
+        if not self._available:
+            return None
+        try:
+            kkey = self._key("kind", kind)
+            members = self._r.smembers(kkey)
+            return list(members) if members else None
+        except Exception:
+            return None
+
+    def delete_kind(self, entry: MemoryEntry) -> None:
+        """Remove an entry from kind index."""
+        if not self._available:
+            return
+        try:
+            kkey = self._key("kind", entry.kind)
+            self._r.srem(kkey, entry.memory_id)
         except Exception:
             pass
 
@@ -235,8 +329,11 @@ class RedisCache:
 
 
 class MemoryStore:
-    """SQLite storage with FTS5 full-text search and optional Redis cache.
+    """Redis-primary storage with SQLite durable fallback and FTS5 search.
 
+    Read path: Redis first, SQLite fallback (backfill Redis on miss).
+    Write path: Redis first, then SQLite for durability.
+    FTS: SQLite FTS5 (no Redis equivalent without RediSearch).
     Capacity-limited circular buffer: when count exceeds max_memories,
     lowest-relevance entries are evicted (like MemoryWrite overwrite mode).
     """
@@ -251,7 +348,7 @@ class MemoryStore:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._init_schema()
 
-        # Redis cache (required)
+        # Redis — primary store for reads, SQLite is durable fallback
         r_url = redis_url or os.environ.get("ELEPHANT_CODER_REDIS_URL", "redis://localhost:6380")
         ttl = int(os.environ.get("ELEPHANT_CODER_REDIS_TTL", str(RedisCache.DEFAULT_TTL)))
         self._cache = RedisCache(r_url, _project_hash(project_root), ttl=ttl)
@@ -327,18 +424,19 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def upsert(self, entry: MemoryEntry) -> None:
-        """Insert or replace a memory entry and update FTS index."""
+        """Insert or replace a memory entry. Redis first, then SQLite for durability."""
         now = time.time()
         if entry.created == 0.0:
             entry.created = now
         if entry.freshness == 0.0:
             entry.freshness = now
 
-        cur = self._conn.cursor()
+        # 1. Write to Redis first (primary store)
+        self._cache.put_entry(entry)
 
-        # Delete old FTS row if exists
+        # 2. Write to SQLite for durability + FTS index
+        cur = self._conn.cursor()
         cur.execute("DELETE FROM memories_fts WHERE memory_id = ?", (entry.memory_id,))
-        # Upsert main table
         cur.execute(
             """
             INSERT OR REPLACE INTO memories
@@ -365,7 +463,6 @@ class MemoryStore:
                 int(entry.is_stale),
             ),
         )
-        # Insert FTS row
         cur.execute(
             """
             INSERT INTO memories_fts (memory_id, symbol_name, summary, keywords)
@@ -380,22 +477,47 @@ class MemoryStore:
         )
         self._conn.commit()
 
-        # Write-through to Redis
-        self._cache.put_entry(entry)
-
     def upsert_batch(self, entries: list[MemoryEntry]) -> None:
-        """Insert or replace multiple entries in a single transaction."""
+        """Insert or replace multiple entries. Redis first, then SQLite for durability."""
         if not entries:
             return
         now = time.time()
+        for entry in entries:
+            if entry.created == 0.0:
+                entry.created = now
+            if entry.freshness == 0.0:
+                entry.freshness = now
+
+        # 1. Write to Redis first (primary store) — pipelined for performance
+        if self._cache.available:
+            try:
+                pipe = self._cache._r.pipeline()
+                for entry in entries:
+                    key = self._cache._key("mem", entry.memory_id)
+                    pipe.setex(key, self._cache._ttl, json.dumps(_entry_to_dict(entry)))
+                    fkey = self._cache._key("file", self._cache._file_hash(entry.file_path))
+                    pipe.sadd(fkey, entry.memory_id)
+                    pipe.expire(fkey, self._cache._ttl)
+                    # Symbol index
+                    skey = self._cache._key("sym", entry.symbol_name)
+                    pipe.sadd(skey, entry.memory_id)
+                    pipe.expire(skey, self._cache._ttl)
+                    skkey = self._cache._key("sym", f"{entry.symbol_name}:{entry.kind}")
+                    pipe.sadd(skkey, entry.memory_id)
+                    pipe.expire(skkey, self._cache._ttl)
+                    # Kind index
+                    kkey = self._cache._key("kind", entry.kind)
+                    pipe.sadd(kkey, entry.memory_id)
+                    pipe.expire(kkey, self._cache._ttl)
+                pipe.execute()
+            except Exception:
+                pass
+
+        # 2. Write to SQLite for durability + FTS index
         cur = self._conn.cursor()
         try:
             cur.execute("BEGIN IMMEDIATE")
             for entry in entries:
-                if entry.created == 0.0:
-                    entry.created = now
-                if entry.freshness == 0.0:
-                    entry.freshness = now
                 cur.execute("DELETE FROM memories_fts WHERE memory_id = ?", (entry.memory_id,))
                 cur.execute(
                     """INSERT OR REPLACE INTO memories
@@ -418,19 +540,6 @@ class MemoryStore:
         except Exception:
             self._conn.rollback()
             raise
-        # Batch Redis pipeline
-        if self._cache.available:
-            try:
-                pipe = self._cache._r.pipeline()
-                for entry in entries:
-                    key = self._cache._key("mem", entry.memory_id)
-                    pipe.setex(key, self._cache._ttl, json.dumps(_entry_to_dict(entry)))
-                    fkey = self._cache._key("file", self._cache._file_hash(entry.file_path))
-                    pipe.sadd(fkey, entry.memory_id)
-                    pipe.expire(fkey, self._cache._ttl)
-                pipe.execute()
-            except Exception:
-                pass
 
     def get(self, memory_id: str) -> MemoryEntry | None:
         """Fetch a single memory by ID."""
@@ -512,15 +621,45 @@ class MemoryStore:
         return results
 
     def search_by_kind(self, kind: str, limit: int = 50) -> list[MemoryEntry]:
-        """Get memories filtered by kind."""
+        """Get memories filtered by kind. Redis first, SQLite fallback."""
+        # 1. Try Redis kind index
+        cached_ids = self._cache.get_kind(kind)
+        if cached_ids:
+            entries = []
+            for mid in list(cached_ids)[:limit]:
+                e = self._cache.get_entry(mid)
+                if e is not None:
+                    entries.append(e)
+            if entries:
+                entries.sort(key=lambda e: e.relevance_score, reverse=True)
+                return entries
+
+        # 2. SQLite fallback
         rows = self._conn.execute(
             "SELECT * FROM memories WHERE kind = ? ORDER BY relevance_score DESC LIMIT ?",
             (kind, limit),
         ).fetchall()
-        return [self._row_to_entry(r) for r in rows]
+        results = [self._row_to_entry(r) for r in rows]
+        # Backfill Redis
+        for e in results:
+            self._cache.put_entry(e)
+        return results
 
     def search_by_symbol(self, name: str, kind: str | None = None) -> list[MemoryEntry]:
-        """Direct symbol lookup by name (exact or prefix match)."""
+        """Direct symbol lookup by name. Redis first, SQLite fallback."""
+        # 1. Try Redis symbol index
+        cached_ids = self._cache.get_symbol(name, kind)
+        if cached_ids:
+            entries = []
+            for mid in cached_ids:
+                e = self._cache.get_entry(mid)
+                if e is not None:
+                    entries.append(e)
+            if entries:
+                entries.sort(key=lambda e: e.relevance_score, reverse=True)
+                return entries
+
+        # 2. SQLite fallback (exact match, then prefix)
         if kind:
             rows = self._conn.execute(
                 "SELECT * FROM memories WHERE symbol_name = ? AND kind = ? ORDER BY relevance_score DESC",
@@ -541,7 +680,11 @@ class MemoryStore:
                     "SELECT * FROM memories WHERE symbol_name LIKE ? ORDER BY relevance_score DESC LIMIT 20",
                     (f"{name}%",),
                 ).fetchall()
-        return [self._row_to_entry(r) for r in rows]
+        results = [self._row_to_entry(r) for r in rows]
+        # Backfill Redis
+        for e in results:
+            self._cache.put_entry(e)
+        return results
 
     def get_dependencies(self, file_path: str) -> dict:
         """Get what a file imports and what imports it."""
@@ -595,19 +738,21 @@ class MemoryStore:
         self._conn.commit()
 
     def delete(self, memory_id: str) -> bool:
-        """Delete a memory and its FTS entry."""
-        # Get file_path for cache invalidation
+        """Delete a memory and its FTS entry. Cleans up all Redis indexes."""
+        # Get full entry info for cache invalidation
         row = self._conn.execute(
-            "SELECT file_path FROM memories WHERE memory_id = ?", (memory_id,)
+            "SELECT file_path, symbol_name, kind FROM memories WHERE memory_id = ?", (memory_id,)
         ).fetchone()
         file_path = row["file_path"] if row else None
+        symbol_name = row["symbol_name"] if row else None
+        kind = row["kind"] if row else None
 
         cur = self._conn.cursor()
         cur.execute("DELETE FROM memories_fts WHERE memory_id = ?", (memory_id,))
         cur.execute("DELETE FROM memories WHERE memory_id = ?", (memory_id,))
         self._conn.commit()
 
-        self._cache.delete_entry(memory_id, file_path)
+        self._cache.delete_entry(memory_id, file_path, symbol_name, kind)
         return cur.rowcount > 0
 
     def delete_by_file(self, file_path: str) -> int:

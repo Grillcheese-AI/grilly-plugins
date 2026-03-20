@@ -1,7 +1,7 @@
 {
   "name": "elephant-coder",
   "description": "Persistent codebase memory with multi-language indexing, file link graph, task management, RSS news briefing, research notes, external validation via OpenRouter, scope guard, and automatic session context injection",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "author": {
     "name": "grillcheese"
   },

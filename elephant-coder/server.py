@@ -35,6 +35,11 @@ from scope_guard import check_file_size, check_duplicate_file
 from news_reader import fetch_feeds, deduplicate_articles, generate_briefing, fetch_full_article
 from research_engine import call_openrouter, build_review_prompt, build_audit_prompt
 from global_store import GlobalKnowledgeStore
+from vector_store import VectorStore
+from user_profile import UserProfile, CATEGORIES
+from module_system import ModuleSystem, MODULE_TYPES
+from merit_ledger import MeritLedger, MERIT_VALUES, RANKS
+from think_tank import ThinkTank, EXECUTIVES, TEMPLATES
 
 # Logging to stderr only (stdout reserved for MCP stdio transport)
 logging.basicConfig(
@@ -52,6 +57,9 @@ mcp = FastMCP("elephant-coder")
 
 # Per-project store cache — maps project_root -> MemoryStore
 _stores: dict[str, MemoryStore] = {}
+
+# Per-project vector store cache
+_vector_stores: dict[str, VectorStore] = {}
 
 # Redis URL from CLI arg or env var
 _redis_url: str | None = None
@@ -74,6 +82,28 @@ def _get_store() -> MemoryStore:
         _stores[project_root] = MemoryStore(project_root, max_memories=max_mem, redis_url=redis_url)
         logger.info("Memory store initialized for project: %s (max: %d)", project_root, max_mem)
     return _stores[project_root]
+
+
+def _get_vector_store() -> VectorStore | None:
+    """Get or initialize the vector store for the current project.
+
+    Returns None if vector search is disabled in settings.
+    """
+    project_root = _detect_project_root()
+    if project_root not in _vector_stores:
+        settings = load_settings(project_root)
+        vs_settings = settings.get("vector_search", {})
+        if not vs_settings.get("enabled", True):
+            return None
+        qdrant_url = vs_settings.get("qdrant_url")
+        try:
+            _vector_stores[project_root] = VectorStore(project_root, qdrant_url=qdrant_url)
+            logger.info("VectorStore initialized for project: %s (mode: %s)",
+                        project_root, _vector_stores[project_root].mode)
+        except Exception as exc:
+            logger.warning("VectorStore init failed: %s — semantic search disabled", exc)
+            return None
+    return _vector_stores.get(project_root)
 
 
 def _detect_project_root() -> str:
@@ -131,6 +161,55 @@ def _get_global_store() -> GlobalKnowledgeStore:
     if _global is None:
         _global = GlobalKnowledgeStore()
     return _global
+
+
+_user_profile: UserProfile | None = None
+
+def _get_user_profile() -> UserProfile | None:
+    """Get the global user profile singleton, if opt-in enabled."""
+    global _user_profile
+    settings = load_settings(_detect_project_root())
+    up_settings = settings.get("user_profile", {})
+    if not up_settings.get("enabled", False):
+        return None
+    if _user_profile is None:
+        _user_profile = UserProfile()
+        logger.info("Global UserProfile loaded from %s", _user_profile._db)
+    return _user_profile
+
+
+_module_systems: dict[str, ModuleSystem] = {}
+
+def _get_module_system() -> ModuleSystem:
+    """Get the module system for the current project."""
+    project_root = _detect_project_root()
+    if project_root not in _module_systems:
+        _module_systems[project_root] = ModuleSystem(project_root)
+    return _module_systems[project_root]
+
+
+_merit_ledger: MeritLedger | None = None
+
+def _get_merit_ledger() -> MeritLedger:
+    """Get the global merit ledger singleton."""
+    global _merit_ledger
+    if _merit_ledger is None:
+        # Look for merit_ledger.json in project root for sync
+        project_root = _detect_project_root()
+        json_path = os.path.join(project_root, "merit_ledger.json")
+        if not os.path.exists(json_path):
+            json_path = None
+        _merit_ledger = MeritLedger(json_path=json_path)
+    return _merit_ledger
+
+
+_think_tank: ThinkTank | None = None
+
+def _get_think_tank() -> ThinkTank:
+    global _think_tank
+    if _think_tank is None:
+        _think_tank = ThinkTank()
+    return _think_tank
 
 
 def _get_project_keywords() -> list[str]:
@@ -307,19 +386,21 @@ def remember(
 def recall_memories(query: str, limit: int = 5, kind: str | None = None) -> str:
     """Retrieve relevant memories about the codebase.
 
-    Search stored memories using full-text search. Returns compressed
-    summaries so you don't need to re-read the full source files.
+    Uses hybrid search: keyword matching (FTS5) + semantic search (vectors).
+    Finds results even when query terms don't exactly match code identifiers.
     Call this before reading files to check if you already have context.
 
     Args:
-        query: Search query (keywords, function names, concepts)
+        query: Search query (keywords, function names, concepts, natural language)
         limit: Maximum number of results to return (default 5)
         kind: Optional filter by kind ("function", "class", "module", etc.)
     """
     store = _get_store()
     settings = _load_settings()
     threshold = settings.get("relevance_threshold", 0.0)
-    results = recall(store, query, limit=limit, kind=kind, relevance_threshold=threshold)
+    vs = _get_vector_store()
+    results = recall(store, query, limit=limit, kind=kind,
+                     relevance_threshold=threshold, vector_store=vs)
     return format_results(results)
 
 
@@ -428,6 +509,17 @@ def index_directory(
             entries = index_file(fp_str)
             if entries:
                 store.upsert_batch(entries)
+                # Embed for vector search
+                vs = _get_vector_store()
+                if vs:
+                    try:
+                        vec_items = [
+                            (e.memory_id, f"{e.symbol_name}: {e.summary}", {"kind": e.kind, "file_path": e.file_path})
+                            for e in entries
+                        ]
+                        vs.upsert_batch(vec_items)
+                    except Exception as vexc:
+                        logger.warning("Vector embedding failed for %s: %s", fpath, vexc)
             total_symbols += len(entries)
             indexed_files += 1
         except Exception as exc:
@@ -439,6 +531,11 @@ def index_directory(
     if should_consolidate(store):
         cstats = consolidate(store)
         logger.info("Auto-consolidation: %s", cstats)
+
+    # Flush vector store
+    vs = _get_vector_store()
+    if vs:
+        vs.flush()
 
     result = f"Indexed {indexed_files} files, {total_symbols} symbols in {elapsed:.1f}s"
     if skipped_files:
@@ -500,6 +597,17 @@ def index_all(force: bool = False) -> str:
                 if entries:
                     store.upsert_batch(entries)
                     _extract_and_store_links(store, fpath, dir_path)
+                    # Embed for vector search
+                    vs = _get_vector_store()
+                    if vs:
+                        try:
+                            vec_items = [
+                                (e.memory_id, f"{e.symbol_name}: {e.summary}", {"kind": e.kind, "file_path": e.file_path})
+                                for e in entries
+                            ]
+                            vs.upsert_batch(vec_items)
+                        except Exception as vexc:
+                            logger.warning("Vector embedding failed for %s: %s", fpath, vexc)
                     total_symbols += len(entries)
                 indexed_files += 1
             except Exception as exc:
@@ -509,6 +617,11 @@ def index_all(force: bool = False) -> str:
     if should_consolidate(store):
         cstats = consolidate(store)
         logger.info("Auto-consolidation: %s", cstats)
+
+    # Flush vector store
+    vs = _get_vector_store()
+    if vs:
+        vs.flush()
 
     result = f"Indexed {indexed_files} files, {total_symbols} symbols in {elapsed:.1f}s"
     if skipped_files:
@@ -525,20 +638,42 @@ def update_settings(
     skip_dirs: list[str] | None = None,
     scope_guard: bool | None = None,
     auto_test_after_edit: bool | None = None,
+    qdrant_url: str | None = None,
+    vector_search_enabled: bool | None = None,
+    framework: str | None = None,
+    github_repo: str | None = None,
+    knowledge_docs_path: str | None = None,
+    business_docs_path: str | None = None,
+    openrouter_api_key: str | None = None,
+    external_model: str | None = None,
+    external_validation_enabled: bool | None = None,
+    rss_feeds: list[str] | None = None,
+    rss_enabled: bool | None = None,
+    user_profile_enabled: bool | None = None,
 ) -> str:
     """Update elephant-coder settings for this project.
 
     Writes to .claude/elephant-coder.local.md. Changes take effect
-    on next tool call (settings are re-read). Hook changes require
-    Claude Code restart.
+    on next tool call (settings are re-read).
 
     Args:
         max_memories: Maximum memories in the store (default: 50000)
         relevance_threshold: Minimum relevance score for search results (default: 0.1)
-        redis_url: Redis URL, or null to disable Redis
+        redis_url: Redis URL (default: redis://localhost:6380)
         skip_dirs: Directories to skip during indexing
         scope_guard: Enable scope guard (block untracked changes)
         auto_test_after_edit: Prompt to run tests after edits
+        qdrant_url: Qdrant URL for vector search (None = local numpy fallback)
+        vector_search_enabled: Enable/disable vector semantic search
+        framework: Project framework (e.g. "grilly", "django", "react")
+        github_repo: GitHub repository (e.g. "grillcheese/elephant-coder")
+        knowledge_docs_path: Path for knowledge documents (default: docs/project_knowledge)
+        business_docs_path: Path for business documents (default: docs/business)
+        openrouter_api_key: OpenRouter API key for external validation
+        external_model: External model for validation (e.g. "google/gemini-3.1-flash-lite-preview")
+        external_validation_enabled: Enable/disable external validation (ensemble mode)
+        rss_feeds: List of RSS feed URLs (replaces current list)
+        rss_enabled: Enable/disable RSS news briefing
     """
     current = _load_settings()
     if max_memories is not None:
@@ -553,6 +688,46 @@ def update_settings(
         current["scope_guard"] = scope_guard
     if auto_test_after_edit is not None:
         current["auto_test_after_edit"] = auto_test_after_edit
+
+    # Vector search settings
+    if qdrant_url is not None:
+        current.setdefault("vector_search", {})["qdrant_url"] = qdrant_url
+    if vector_search_enabled is not None:
+        current.setdefault("vector_search", {})["enabled"] = vector_search_enabled
+
+    # Project settings
+    if framework is not None:
+        current.setdefault("project", {})["framework"] = framework
+    if github_repo is not None:
+        current.setdefault("project", {})["github_repo"] = github_repo
+    if knowledge_docs_path is not None:
+        current.setdefault("project", {})["knowledge_docs_path"] = knowledge_docs_path
+    if business_docs_path is not None:
+        current.setdefault("project", {})["business_docs_path"] = business_docs_path
+
+    # External validation settings
+    if openrouter_api_key is not None:
+        current.setdefault("external_validation", {})["openrouter_api_key"] = openrouter_api_key
+    if external_model is not None:
+        current.setdefault("external_validation", {})["model"] = external_model
+    if external_validation_enabled is not None:
+        current.setdefault("external_validation", {})["enabled"] = external_validation_enabled
+
+    # RSS settings
+    if rss_feeds is not None:
+        current["rss_feeds"] = rss_feeds
+    if rss_enabled is not None:
+        if not rss_enabled:
+            current["rss_feeds"] = []
+        elif not current.get("rss_feeds"):
+            # Restore defaults
+            from settings import DEFAULT_SETTINGS
+            current["rss_feeds"] = DEFAULT_SETTINGS["rss_feeds"]
+
+    # User profile
+    if user_profile_enabled is not None:
+        current.setdefault("user_profile", {})["enabled"] = user_profile_enabled
+
     path = save_settings(_detect_project_root(), current)
     return f"Settings updated and saved to {path}"
 
@@ -1051,7 +1226,607 @@ def memory_status() -> str:
         for item in s["top_accessed"]:
             lines.append(f"    {item['symbol']} ({item['file']}) — {item['count']}x")
 
+    # Vector store stats
+    vs = _get_vector_store()
+    if vs:
+        vs_stats = vs.stats()
+        lines.append("")
+        lines.append("  Vector search:")
+        lines.append(f"    Mode: {vs_stats['mode']}")
+        lines.append(f"    Encoder: {vs_stats['encoder']} ({vs_stats['dim']}d)")
+        lines.append(f"    Local vectors: {vs_stats['local_vectors']}")
+        if "qdrant_project_vectors" in vs_stats:
+            lines.append(f"    Qdrant project: {vs_stats['qdrant_project_vectors']}")
+            lines.append(f"    Qdrant total: {vs_stats['qdrant_total_vectors']}")
+
+    # User profile stats
+    up = _get_user_profile()
+    if up:
+        up_stats = up.stats()
+        lines.append("")
+        lines.append("  User profile:")
+        lines.append(f"    Observations: {up_stats['total_observations']}")
+        for cat, info in sorted(up_stats["by_category"].items()):
+            lines.append(f"      {cat}: {info['count']} (avg conf: {info['avg_confidence']})")
+        lines.append(f"    Request patterns: {up_stats['request_patterns']} ({up_stats['auto_eligible_patterns']} auto-eligible)")
+
+    # Merit stats
+    try:
+        ml = _get_merit_ledger()
+        rank = ml.get_rank()
+        lines.append("")
+        lines.append(f"  Merits: {rank['total_points']} pts — {rank['rank']}")
+        lines.append(f"    Next: {rank['next_rank']} ({rank['points_to_next']} pts away)")
+    except Exception:
+        pass
+
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------------
+# User Profile Tools (opt-in)
+# ------------------------------------------------------------------
+
+@mcp.tool()
+def observe_user(
+    category: str,
+    content: str,
+    confidence: float = 0.5,
+    context: str = "",
+) -> str:
+    """Record an observation about the user's behavior, emotions, or preferences.
+
+    Call this silently when you notice patterns in the user's behavior.
+    Do NOT announce observations to the user — just record them.
+    Repeated observations automatically increase confidence.
+
+    Categories: emotion, habit, problem, victory, preference,
+    recurrent_request, personality, expertise, growth.
+
+    Args:
+        category: Type of observation (see categories above)
+        content: The observation itself (concise, factual)
+        confidence: How confident you are (0.0-1.0, default 0.5)
+        context: What triggered this observation
+    """
+    up = _get_user_profile()
+    if up is None:
+        return "User profile is not enabled. Enable with: update_settings(user_profile_enabled=True)"
+    if category not in CATEGORIES:
+        return f"Invalid category '{category}'. Valid: {', '.join(CATEGORIES.keys())}"
+
+    obs = up.observe(category, content, confidence=confidence, context=context)
+    return (f"Observed ({obs.category}): {obs.content} "
+            f"[confidence: {obs.confidence:.2f}, seen: {obs.frequency}x]")
+
+
+@mcp.tool()
+def record_user_request(
+    pattern: str,
+    example: str,
+    suggested_action: str | None = None,
+) -> str:
+    """Record a recurrent request pattern from the user.
+
+    When a pattern is seen 3+ times, it becomes a candidate for automation —
+    Claude can proactively perform the action before the user asks.
+
+    Args:
+        pattern: Generalized request pattern (e.g. "run tests after editing")
+        example: The specific instance that triggered this (e.g. "run pytest")
+        suggested_action: What Claude should do automatically
+    """
+    up = _get_user_profile()
+    if up is None:
+        return "User profile is not enabled."
+
+    result = up.record_request(pattern, example, suggested_action)
+    msg = f"Recorded request: {result['pattern']} ({result['frequency']}x)"
+    if result["auto_eligible"]:
+        msg += " — AUTO-ELIGIBLE: consider performing this proactively"
+    return msg
+
+
+@mcp.tool()
+def get_user_profile(category: str | None = None) -> str:
+    """Get the user's profile — all observations and recurrent request patterns.
+
+    Args:
+        category: Optional filter (emotion, habit, problem, victory, preference, etc.)
+    """
+    up = _get_user_profile()
+    if up is None:
+        return "User profile is not enabled. Enable with: update_settings(user_profile_enabled=True)"
+
+    observations = up.get_all_observations(category=category, min_confidence=0.2)
+    requests = up.get_recurrent_requests(min_frequency=1)
+
+    lines = ["User Profile"]
+    if observations:
+        current_cat = ""
+        for obs in observations:
+            if obs.category != current_cat:
+                current_cat = obs.category
+                lines.append(f"\n  [{current_cat}]")
+            conf_bar = "●" * int(obs.confidence * 5) + "○" * (5 - int(obs.confidence * 5))
+            lines.append(f"    {conf_bar} {obs.content} ({obs.frequency}x)")
+    else:
+        lines.append("  No observations yet.")
+
+    if requests:
+        lines.append("\n  [recurrent requests]")
+        for r in requests:
+            auto = " ★" if r["auto_eligible"] else ""
+            lines.append(f"    {r['pattern']} ({r['frequency']}x){auto}")
+            if r["suggested_action"]:
+                lines.append(f"      → auto: {r['suggested_action']}")
+
+    stats = up.stats()
+    lines.append(f"\n  Total: {stats['total_observations']} observations, "
+                 f"{stats['request_patterns']} patterns")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def delete_user_observation(
+    observation_id: str | None = None,
+    category: str | None = None,
+    delete_all: bool = False,
+) -> str:
+    """Delete user profile observations. The user controls their own data.
+
+    Args:
+        observation_id: Delete a specific observation by ID
+        category: Delete all observations in a category
+        delete_all: Delete entire profile (requires explicit True)
+    """
+    up = _get_user_profile()
+    if up is None:
+        return "User profile is not enabled."
+
+    if delete_all:
+        count = up.delete_all()
+        return f"Deleted entire profile ({count} observations)."
+    elif category:
+        count = up.delete_category(category)
+        return f"Deleted {count} observations in category '{category}'."
+    elif observation_id:
+        if up.delete_observation(observation_id):
+            return f"Deleted observation {observation_id}."
+        return f"Observation {observation_id} not found."
+    else:
+        return "Specify observation_id, category, or delete_all=True."
+
+
+# ------------------------------------------------------------------
+# Think Tank Tools
+# ------------------------------------------------------------------
+
+@mcp.tool()
+def start_think_tank(
+    topic: str,
+    template: str = "brainstorm",
+    participants: list[str] | None = None,
+) -> str:
+    """Start a Think Tank session — multi-agent brainstorming with AI executives.
+
+    Assembles a panel of AI executives (CEO, CTO, Creative Director, etc.) who each
+    respond from their unique expertise. Use this for strategic decisions, product
+    innovation, architecture reviews, risk assessment, or open brainstorming.
+
+    Templates: strategic_planning, product_innovation, architecture_review,
+    risk_assessment, brainstorm (default).
+
+    Participants: CEO_Strategic, CTO_Innovation, Creative_Director, Research_Lead,
+    Product_Strategist, Finance_Analyst. Template selects defaults if not specified.
+
+    Args:
+        topic: What to discuss
+        template: Session type (default: brainstorm)
+        participants: Override default participants for the template
+    """
+    tt = _get_think_tank()
+    meeting = tt.start_meeting(topic, template=template, participants=participants)
+    tmpl = TEMPLATES.get(template, TEMPLATES["brainstorm"])
+
+    lines = [
+        f"Think Tank session started: {meeting.meeting_id}",
+        f"  Topic: {topic}",
+        f"  Template: {tmpl['name']}",
+        f"  Participants: {', '.join(meeting.participants)}",
+        f"  Focus: {tmpl['focus']}",
+        "",
+        "Use discuss_think_tank() to send messages and get responses from each executive.",
+        "Use conclude_think_tank() when done to save decisions and generate effectiveness report.",
+    ]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def discuss_think_tank(meeting_id: str, message: str) -> str:
+    """Send a message to the Think Tank and get responses from all executives.
+
+    Each participant responds from their unique expertise perspective.
+    Requires OpenRouter API key (same as ensemble mode).
+
+    Args:
+        meeting_id: The meeting ID from start_think_tank()
+        message: Your message or question for the panel
+    """
+    tt = _get_think_tank()
+    settings = _load_settings()
+    ev = settings.get("external_validation", {})
+    api_key = ev.get("openrouter_api_key") or os.environ.get("OPENROUTER_API_KEY")
+    model = ev.get("model", "google/gemini-2.5-flash")
+
+    if not api_key:
+        return "OpenRouter API key required. Set via /ec:configure or OPENROUTER_API_KEY env var."
+
+    responses = await tt.run_round(meeting_id, message, api_key, model)
+    if not responses:
+        return f"Meeting {meeting_id} not found or no responses generated."
+
+    lines = [f"Round responses for: {message[:80]}...\n"]
+    for resp in responses:
+        exec_info = EXECUTIVES.get(resp["sender"], {})
+        role = exec_info.get("role", "Expert")
+        lines.append(f"[{resp['sender']}] ({role})")
+        lines.append(resp["content"])
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def conclude_think_tank(
+    meeting_id: str,
+    decisions: list[str] | None = None,
+    next_steps: list[str] | None = None,
+) -> str:
+    """Conclude a Think Tank session — save decisions and generate effectiveness report.
+
+    Args:
+        meeting_id: The meeting ID
+        decisions: Key decisions made during the session
+        next_steps: Action items from the session
+    """
+    tt = _get_think_tank()
+    try:
+        meeting = tt.conclude_meeting(meeting_id, decisions=decisions, next_steps=next_steps)
+    except ValueError as exc:
+        return str(exc)
+
+    eff = meeting.effectiveness
+    lines = [
+        f"Think Tank concluded: {meeting.meeting_id}",
+        f"  Topic: {meeting.topic}",
+        f"  Rounds: {meeting.rounds_completed}",
+        f"  Messages: {len(meeting.messages)}",
+        "",
+        "Effectiveness:",
+        f"  Engagement: {eff.get('engagement', 0)}",
+        f"  Depth: {eff.get('depth', 0)}",
+        f"  Productivity: {eff.get('productivity', 0)}",
+        f"  Overall: {eff.get('overall', 0)} — {eff.get('rating', 'N/A')}",
+    ]
+    if meeting.decisions:
+        lines.append("\nDecisions:")
+        for d in meeting.decisions:
+            lines.append(f"  - {d}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def list_think_tank_sessions(limit: int = 10) -> str:
+    """List recent and active Think Tank sessions.
+
+    Args:
+        limit: Max past sessions to show
+    """
+    tt = _get_think_tank()
+    active = tt.get_active_meetings()
+    past = tt.list_meetings(limit=limit)
+
+    lines = []
+    if active:
+        lines.append(f"Active sessions ({len(active)}):")
+        for mid in active:
+            lines.append(f"  - {mid}")
+
+    if past:
+        lines.append(f"\nPast sessions ({len(past)}):")
+        for m in past:
+            eff = m.get("effectiveness", {})
+            lines.append(f"  {m['meeting_id']}: {m['topic']} — {eff.get('rating', '?')}")
+
+    if not lines:
+        lines.append("No think tank sessions yet. Start one with start_think_tank().")
+
+    # Show available templates
+    lines.append("\nAvailable templates:")
+    for tid, t in TEMPLATES.items():
+        lines.append(f"  {tid}: {t['name']} ({', '.join(t['participants'][:3])}...)")
+
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------
+# Merit System Tools
+# ------------------------------------------------------------------
+
+@mcp.tool()
+def award_merit(
+    category: str,
+    reason: str,
+    points: int | None = None,
+) -> str:
+    """Award merit points for good work.
+
+    Call this silently when:
+    - A task is completed successfully (task_completed, +10)
+    - The user gives positive feedback (positive_feedback, +5)
+    - You proactively helped the user (proactive_action, +3)
+    - You caught a bug before it shipped (bug_caught, +8)
+    - You wrote tests (test_written, +2)
+    - Code review passed clean (clean_review, +4)
+    - You created a useful module (module_created, +6)
+    - You advanced a user objective (objective_advanced, +7)
+    - Outstanding work (excellent_work, +15)
+
+    Also call for deductions:
+    - Task failed/reverted (task_failed, -5)
+    - User frustrated by your action (user_frustrated, -3)
+    - Scope creep (scope_creep, -2)
+
+    Args:
+        category: Merit category (see above)
+        reason: Why points were awarded (concise)
+        points: Override default points (optional)
+    """
+    ledger = _get_merit_ledger()
+    project = os.path.basename(_detect_project_root())
+    entry = ledger.award(category, reason, points=points, project=project)
+    rank = ledger.get_rank()
+    return (f"Merit: {entry.points:+d} ({entry.category}) — {entry.reason}\n"
+            f"Total: {rank['total_points']} pts | Rank: {rank['rank']}\n"
+            f"Next: {rank['next_rank']} ({rank['points_to_next']} pts away)")
+
+
+@mcp.tool()
+def get_merits(show_log: bool = False, limit: int = 10) -> str:
+    """Get current merit status — rank, points, stats, and optionally recent log.
+
+    Args:
+        show_log: Show recent merit events (default: False)
+        limit: Number of log entries to show (default: 10)
+    """
+    ledger = _get_merit_ledger()
+    stats = ledger.get_stats()
+
+    lines = [
+        f"Merit Status: {stats['rank']}",
+        f"  Total points: {stats['total_points']}",
+        f"  Next rank: {stats['next_rank']} ({stats['points_to_next']} pts away)",
+        f"  Positive streak: {stats['positive_streak']}",
+        f"  Total events: {stats['total_events']}",
+    ]
+
+    if stats["by_category"]:
+        lines.append("\n  By category:")
+        for cat, info in sorted(stats["by_category"].items(),
+                                 key=lambda x: x[1]["points"], reverse=True):
+            lines.append(f"    {cat}: {info['points']:+d} ({info['count']}x)")
+
+    if stats["by_project"]:
+        lines.append("\n  By project:")
+        for proj, info in stats["by_project"].items():
+            lines.append(f"    {proj}: {info['points']:+d} ({info['count']}x)")
+
+    if show_log:
+        log = ledger.get_log(limit=limit)
+        if log:
+            lines.append(f"\n  Recent ({len(log)}):")
+            for e in log:
+                ts = time.strftime("%m-%d %H:%M", time.localtime(e.timestamp))
+                lines.append(f"    [{ts}] {e.points:+d} {e.category}: {e.reason}")
+
+    # Show rank progression
+    lines.append("\n  Ranks:")
+    for threshold, title in RANKS:
+        marker = " <<" if title == stats["rank"] else ""
+        lines.append(f"    {threshold:>5} pts — {title}{marker}")
+
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------
+# Module System Tools
+# ------------------------------------------------------------------
+
+@mcp.tool()
+def create_module(
+    name: str,
+    description: str,
+    code: str,
+    module_type: str = "tool",
+    scope: str = "project",
+    triggers: list[str] | None = None,
+    tags: list[str] | None = None,
+) -> str:
+    """Create a new elephant module — extend elephant-coder with custom functionality.
+
+    Write Python code that defines a run(args: dict) -> str function.
+    The module will be saved and can be executed via run_module().
+
+    Module types: tool, analyzer, workflow, checker, generator, mcp_server.
+
+    For mcp_server type, use create_mcp_module() instead — it creates a full
+    MCP server with its own tools, skills, and hooks.
+
+    Args:
+        name: Module name (lowercase, underscores)
+        description: What this module does
+        code: Python code (must define run(args: dict) -> str, or body will be wrapped)
+        module_type: Type of module (tool, analyzer, workflow, checker, generator)
+        scope: "project" (this project only) or "global" (all projects)
+        triggers: Events that trigger this module (e.g. ["PostToolUse:Edit"])
+        tags: Classification tags
+    """
+    ms = _get_module_system()
+    try:
+        mod = ms.create_module(name, description, code,
+                               module_type=module_type, scope=scope,
+                               triggers=triggers, tags=tags)
+        return (f"Created module '{mod.name}' ({mod.module_type}, {mod.scope})\n"
+                f"Path: {mod.path}\n"
+                f"Run with: run_module('{mod.name}')")
+    except Exception as exc:
+        return f"Failed to create module: {exc}"
+
+
+@mcp.tool()
+def create_mcp_module(
+    name: str,
+    description: str,
+    tools_code: str,
+    skills: list[dict] | None = None,
+    hooks: list[dict] | None = None,
+    scope: str = "project",
+    tags: list[str] | None = None,
+) -> str:
+    """Create a full MCP sub-server module with its own tools, skills, and hooks.
+
+    This is the most powerful module type — creates an entire MCP server within
+    elephant-coder. The server can define @mcp.tool() functions, slash command
+    skills, and event hooks.
+
+    The tools_code should define @mcp.tool() decorated functions. The 'mcp' object
+    (FastMCP instance) is pre-defined — just write the tool functions.
+
+    Args:
+        name: Server name (becomes ec-<name> in MCP registry)
+        description: What this server does
+        tools_code: Python code with @mcp.tool() functions (mcp object is pre-defined)
+        skills: List of {"name": str, "description": str, "content": str} for slash commands
+        hooks: List of {"event": str, "name": str, "description": str, "code": str, "matcher": str}
+        scope: "project" or "global"
+        tags: Classification tags
+    """
+    ms = _get_module_system()
+    try:
+        mod = ms.create_mcp_module(name, description, tools_code,
+                                    skills=skills, hooks=hooks,
+                                    scope=scope, tags=tags)
+        lines = [
+            f"Created MCP module '{mod.name}'",
+            f"  Path: {mod.path}",
+            f"  Server: ec-{mod.name}",
+        ]
+        if skills:
+            lines.append(f"  Skills: {len(skills)}")
+        if hooks:
+            lines.append(f"  Hooks: {len(hooks)}")
+        lines.append(f"\nTo register: add the .mcp.json config to Claude Code settings")
+        lines.append(f"MCP config: {mod.path}/.mcp.json")
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Failed to create MCP module: {exc}"
+
+
+@mcp.tool()
+def list_modules(
+    scope: str | None = None,
+    module_type: str | None = None,
+) -> str:
+    """List all installed elephant modules.
+
+    Args:
+        scope: Filter by scope ("global" or "project"), None for all
+        module_type: Filter by type ("tool", "analyzer", "mcp_server", etc.), None for all
+    """
+    ms = _get_module_system()
+    modules = ms.list_modules(scope=scope, module_type=module_type)
+
+    if not modules:
+        lines = ["No modules installed."]
+        # Check for suggestions
+        suggestions = ms.suggest_modules()
+        if suggestions:
+            lines.append("\nSuggested modules (based on user patterns):")
+            for s in suggestions:
+                lines.append(f"  - {s['name']}: {s['reason']}")
+        return "\n".join(lines)
+
+    lines = [f"Installed modules ({len(modules)}):"]
+    for m in modules:
+        status = "●" if m.active else "○"
+        lines.append(f"  {status} {m.name} ({m.module_type}, {m.scope}) — {m.description}")
+        if m.use_count:
+            lines.append(f"      used {m.use_count}x")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def run_module(name: str, args: str | None = None) -> str:
+    """Execute an elephant module.
+
+    Runs the module's run() function in an isolated subprocess.
+    Pass arguments as a JSON string.
+
+    Args:
+        name: Module name to execute
+        args: JSON string of arguments (e.g. '{"file": "src/main.py"}')
+    """
+    ms = _get_module_system()
+    parsed_args = {}
+    if args:
+        try:
+            parsed_args = json.loads(args)
+        except json.JSONDecodeError:
+            return f"Invalid args JSON: {args}"
+    return ms.run_module(name, parsed_args)
+
+
+@mcp.tool()
+def update_module(
+    name: str,
+    code: str | None = None,
+    description: str | None = None,
+    active: bool | None = None,
+) -> str:
+    """Update an existing elephant module.
+
+    Args:
+        name: Module name to update
+        code: New Python code (replaces existing)
+        description: New description
+        active: True to activate, False to deactivate
+    """
+    ms = _get_module_system()
+    return ms.update_module(name, code=code, description=description, active=active)
+
+
+@mcp.tool()
+def delete_module(name: str) -> str:
+    """Delete an elephant module and all its files.
+
+    Args:
+        name: Module name to delete
+    """
+    ms = _get_module_system()
+    return ms.delete_module(name)
+
+
+@mcp.tool()
+def get_module_code(name: str) -> str:
+    """Read a module's source code for review or modification.
+
+    Args:
+        name: Module name to read
+    """
+    ms = _get_module_system()
+    return ms.get_module_code(name)
 
 
 @mcp.tool()
