@@ -125,6 +125,7 @@ def _detect_project_root() -> str:
     1. Explicit override (set by set_project_root tool)
     2. CLAUDE_PROJECT_DIR environment variable (set by Claude Code)
     3. Walk up from cwd to find .git or pyproject.toml
+       (but never resolve to the elephant-coder plugin's own directory)
     """
     if _project_root_override:
         return _project_root_override
@@ -134,8 +135,12 @@ def _detect_project_root() -> str:
     if env_root and Path(env_root).exists():
         return str(Path(env_root).resolve())
 
+    # Walk up from cwd, but skip the plugin's own directory
+    server_dir = str(Path(__file__).resolve().parent)
     cwd = Path.cwd()
     for parent in [cwd, *cwd.parents]:
+        if str(parent.resolve()) == server_dir:
+            continue  # don't resolve to our own plugin source
         if (parent / ".git").exists() or (parent / "pyproject.toml").exists():
             return str(parent)
     return str(cwd)

@@ -1,9 +1,10 @@
 {
   "mcpServers": {
     "elephant-coder": {
-      "command": "python -u",
+      "command": "python",
       "args": [
-        "server.py"
+        "-u",
+        "${CLAUDE_PLUGIN_ROOT}/server.py"
       ]
     }
   }
