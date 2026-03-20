@@ -47,6 +47,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - **MCP tools**: `award_merit()`, `get_merits()` — Claude silently awards/deducts points
 - **SessionStart hook** shows current merit rank
 - **UserPromptSubmit hook** reminds Claude to award merits for completed tasks and positive feedback
+- **Native Think Tank** (`think_tank.py`) — multi-agent brainstorming with 6 AI executives (CEO, CTO, Creative Director, Research Lead, Product Strategist, Finance Analyst). 5 meeting templates. Powered by OpenRouter. Effectiveness analytics with engagement/depth/productivity scores
+- `/ec:think-tank` skill — start, facilitate, and conclude structured multi-agent discussions
+- **MCP tools**: `start_think_tank()`, `discuss_think_tank()`, `conclude_think_tank()`, `list_think_tank_sessions()`
+- `/ec:pdf-convert` skill — convert PDF files to text, markdown, or structured data
 
 ### Changed
 

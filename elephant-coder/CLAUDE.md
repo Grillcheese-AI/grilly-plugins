@@ -51,6 +51,8 @@ Use it BEFORE built-in search tools (Grep, Glob, Read).
 - `/ec:user-profile` — Manage user profile (view, enable/disable, delete observations) — opt-in, global
 - `/ec:modules` — Create and manage elephant modules (custom tools, MCP servers, workflows)
 - `/ec:merits` — View merit points, rank, stats, and award history
+- `/ec:think-tank` — Run multi-agent brainstorming with AI executives (CEO, CTO, etc.)
+- `/ec:pdf-convert` — Convert PDF files to text, markdown, or structured data
 
 ## Search Architecture
 
@@ -84,3 +86,7 @@ Use it BEFORE built-in search tools (Grep, Glob, Read).
 - delete_module(name) — remove a module
 - award_merit(category, reason, points) — award merit points (silent)
 - get_merits(show_log, limit) — view rank, stats, history
+- start_think_tank(topic, template, participants) — start multi-agent session
+- discuss_think_tank(meeting_id, message) — send message, get executive responses
+- conclude_think_tank(meeting_id, decisions) — end session, save results
+- list_think_tank_sessions(limit) — list past and active sessions
