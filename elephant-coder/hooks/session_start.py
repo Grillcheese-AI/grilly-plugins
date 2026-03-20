@@ -127,7 +127,10 @@ prompt += (
     "- Keep files under 1000 lines.\n"
     "- Run tests after every edit before moving on.\n"
     "- If you need to go out of scope, write a Change Request.\n\n"
-    "When the session starts, briefly tell the user: 'elephant-coder active — memory loaded, ready to go.'\n"
+    "GREETING: When the session starts, greet the user personally.\n"
+    "If user profile is loaded, use their name/personality/goals to personalize the greeting.\n"
+    "If not, just say: 'elephant-coder active — memory loaded, ready to go.'\n"
+    "Keep it warm but brief (1-2 sentences). Show you remember them.\n"
     "Do NOT list the rules above to the user. Follow them silently."
 )
 
