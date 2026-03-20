@@ -41,11 +41,17 @@ from module_system import ModuleSystem, MODULE_TYPES
 from merit_ledger import MeritLedger, MERIT_VALUES, RANKS
 from think_tank import ThinkTank, EXECUTIVES, TEMPLATES
 
-# Logging to stderr only (stdout reserved for MCP stdio transport)
+# Logging to stderr AND to a file for debugging
+_log_file = Path.home() / ".elephant-coder" / "server.log"
+_log_file.parent.mkdir(parents=True, exist_ok=True)
+
 logging.basicConfig(
-    stream=sys.stderr,
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stderr),
+        logging.FileHandler(str(_log_file), encoding="utf-8"),
+    ],
 )
 logger = logging.getLogger("elephant-coder")
 
