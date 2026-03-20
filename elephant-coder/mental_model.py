@@ -27,7 +27,8 @@ def _add_project_identity(store, project_root: str, lines: list[str]) -> None:
     root_name = Path(project_root).name
     lines.append(f"### {root_name}")
     lines.append("")
-    rows = store._conn.execute(
+    conn = store._get_sqlite()
+    rows = conn.execute(
         "SELECT symbol_name, summary, line_count FROM memories WHERE kind = 'module' AND file_path LIKE ? ORDER BY line_count DESC LIMIT 10",
         (f"{project_root}%",)).fetchall()
     if rows:

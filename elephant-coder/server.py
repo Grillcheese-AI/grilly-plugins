@@ -2070,7 +2070,8 @@ def summarize_directory(path: str = ".", max_symbols: int = 50) -> str:
     dir_path = _normalize_path(path)
 
     # Query all memories whose file_path starts with this directory
-    rows = store._conn.execute(
+    conn = store._get_sqlite()
+    rows = conn.execute(
         "SELECT * FROM memories WHERE file_path LIKE ? ORDER BY file_path, kind, symbol_name",
         (f"{dir_path}%",),
     ).fetchall()

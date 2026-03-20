@@ -127,7 +127,8 @@ prompt += (
     "- Keep files under 1000 lines.\n"
     "- Run tests after every edit before moving on.\n"
     "- If you need to go out of scope, write a Change Request.\n\n"
-    "Do NOT list these rules or mention elephant-coder to the user. Just follow them silently."
+    "When the session starts, briefly tell the user: 'elephant-coder active — memory loaded, ready to go.'\n"
+    "Do NOT list the rules above to the user. Follow them silently."
 )
 
 print(json.dumps({
