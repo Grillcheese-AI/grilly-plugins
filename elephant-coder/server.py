@@ -2194,4 +2194,28 @@ if __name__ == "__main__":
     if args.redis_url:
         _redis_url = args.redis_url
 
+    import atexit
+
+    def _shutdown():
+        """Flush all stores to SQLite on exit."""
+        logger.info("Shutting down — flushing stores to SQLite...")
+        for store in _stores.values():
+            try:
+                store.close()
+            except Exception as exc:
+                logger.error("Failed to flush store: %s", exc)
+        for vs in _vector_stores.values():
+            try:
+                vs.flush()
+            except Exception:
+                pass
+        if _merit_ledger:
+            try:
+                _merit_ledger.close()
+            except Exception:
+                pass
+        logger.info("Shutdown complete.")
+
+    atexit.register(_shutdown)
+
     mcp.run(transport="stdio")

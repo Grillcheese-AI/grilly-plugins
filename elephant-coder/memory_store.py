@@ -329,36 +329,54 @@ class RedisCache:
 
 
 class MemoryStore:
-    """Redis-primary storage with SQLite durable fallback and FTS5 search.
+    """Redis-primary storage with deferred SQLite persistence.
 
-    Read path: Redis first, SQLite fallback (backfill Redis on miss).
-    Write path: Redis first, then SQLite for durability.
-    FTS: SQLite FTS5 (no Redis equivalent without RediSearch).
-    Capacity-limited circular buffer: when count exceeds max_memories,
-    lowest-relevance entries are evicted (like MemoryWrite overwrite mode).
+    During a session:
+    - All reads/writes go to Redis (fast, in-memory)
+    - SQLite is NOT written to until close() is called
+    - SQLite serves as cold-start fallback when Redis is empty
+
+    On close():
+    - All Redis entries are bulk-flushed to SQLite for durability
+    - FTS5 index is rebuilt from the flushed data
+
+    This eliminates SQLite I/O during active work — Redis handles everything.
     """
 
     def __init__(self, project_root: str, max_memories: int = 50_000, redis_url: str | None = None):
         self.project_root = project_root
         self.max_memories = max_memories
-        db_path = _db_dir(project_root) / "memories.db"
-        self._conn = sqlite3.connect(str(db_path))
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._init_schema()
+        self._db_path = _db_dir(project_root) / "memories.db"
+        self._conn: sqlite3.Connection | None = None  # lazy — only opened on fallback or flush
 
-        # Redis — primary store for reads, SQLite is durable fallback
+        # Redis — primary store, the only store touched during sessions
         r_url = redis_url or os.environ.get("ELEPHANT_CODER_REDIS_URL", "redis://localhost:6379")
         ttl = int(os.environ.get("ELEPHANT_CODER_REDIS_TTL", str(RedisCache.DEFAULT_TTL)))
         self._cache = RedisCache(r_url, _project_hash(project_root), ttl=ttl)
+
+        # Pending writes buffer — flushed to SQLite on close()
+        self._pending: dict[str, MemoryEntry] = {}
+        self._pending_deletes: set[str] = set()
+        self._pending_links: list[tuple[str, str, str, str | None]] = []
+        self._dirty = False
 
     @property
     def cache(self) -> RedisCache:
         return self._cache
 
+    def _get_sqlite(self) -> sqlite3.Connection:
+        """Lazy SQLite connection — only opened when needed (fallback reads or flush)."""
+        if self._conn is None:
+            self._conn = sqlite3.connect(str(self._db_path))
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._init_schema()
+            logger.info("SQLite opened (fallback/flush): %s", self._db_path)
+        return self._conn
+
     def _init_schema(self) -> None:
-        cur = self._conn.cursor()
+        cur = self._conn.cursor()  # _conn is guaranteed set by _get_sqlite()
         cur.executescript("""
             CREATE TABLE IF NOT EXISTS memories (
                 memory_id TEXT PRIMARY KEY,
@@ -424,61 +442,22 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def upsert(self, entry: MemoryEntry) -> None:
-        """Insert or replace a memory entry. Redis first, then SQLite for durability."""
+        """Insert or replace a memory entry. Redis only — SQLite deferred to close()."""
         now = time.time()
         if entry.created == 0.0:
             entry.created = now
         if entry.freshness == 0.0:
             entry.freshness = now
 
-        # 1. Write to Redis first (primary store)
+        # Write to Redis (primary store)
         self._cache.put_entry(entry)
 
-        # 2. Write to SQLite for durability + FTS index
-        cur = self._conn.cursor()
-        cur.execute("DELETE FROM memories_fts WHERE memory_id = ?", (entry.memory_id,))
-        cur.execute(
-            """
-            INSERT OR REPLACE INTO memories
-                (memory_id, file_path, symbol_name, kind, summary, keywords,
-                 dependencies, line_count, access_count, relevance_score, freshness,
-                 file_mtime, created, compression_level, is_stale)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                entry.memory_id,
-                entry.file_path,
-                entry.symbol_name,
-                entry.kind,
-                entry.summary,
-                json.dumps(entry.keywords),
-                json.dumps(entry.dependencies),
-                entry.line_count,
-                entry.access_count,
-                entry.relevance_score,
-                entry.freshness,
-                entry.file_mtime,
-                entry.created,
-                entry.compression_level,
-                int(entry.is_stale),
-            ),
-        )
-        cur.execute(
-            """
-            INSERT INTO memories_fts (memory_id, symbol_name, summary, keywords)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                entry.memory_id,
-                entry.symbol_name,
-                entry.summary,
-                " ".join(entry.keywords),
-            ),
-        )
-        self._conn.commit()
+        # Buffer for SQLite flush on close()
+        self._pending[entry.memory_id] = entry
+        self._dirty = True
 
     def upsert_batch(self, entries: list[MemoryEntry]) -> None:
-        """Insert or replace multiple entries. Redis first, then SQLite for durability."""
+        """Insert or replace multiple entries. Redis only — SQLite deferred to close()."""
         if not entries:
             return
         now = time.time()
@@ -488,7 +467,7 @@ class MemoryStore:
             if entry.freshness == 0.0:
                 entry.freshness = now
 
-        # 1. Write to Redis first (primary store) — pipelined for performance
+        # Write to Redis (primary store) — pipelined for performance
         if self._cache.available:
             try:
                 pipe = self._cache._r.pipeline()
@@ -498,14 +477,12 @@ class MemoryStore:
                     fkey = self._cache._key("file", self._cache._file_hash(entry.file_path))
                     pipe.sadd(fkey, entry.memory_id)
                     pipe.expire(fkey, self._cache._ttl)
-                    # Symbol index
                     skey = self._cache._key("sym", entry.symbol_name)
                     pipe.sadd(skey, entry.memory_id)
                     pipe.expire(skey, self._cache._ttl)
                     skkey = self._cache._key("sym", f"{entry.symbol_name}:{entry.kind}")
                     pipe.sadd(skkey, entry.memory_id)
                     pipe.expire(skkey, self._cache._ttl)
-                    # Kind index
                     kkey = self._cache._key("kind", entry.kind)
                     pipe.sadd(kkey, entry.memory_id)
                     pipe.expire(kkey, self._cache._ttl)
@@ -513,62 +490,46 @@ class MemoryStore:
             except Exception:
                 pass
 
-        # 2. Write to SQLite for durability + FTS index
-        cur = self._conn.cursor()
-        try:
-            cur.execute("BEGIN IMMEDIATE")
-            for entry in entries:
-                cur.execute("DELETE FROM memories_fts WHERE memory_id = ?", (entry.memory_id,))
-                cur.execute(
-                    """INSERT OR REPLACE INTO memories
-                        (memory_id, file_path, symbol_name, kind, summary, keywords,
-                         dependencies, line_count, access_count, relevance_score, freshness,
-                         file_mtime, created, compression_level, is_stale)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (entry.memory_id, entry.file_path, entry.symbol_name,
-                     entry.kind, entry.summary, json.dumps(entry.keywords),
-                     json.dumps(entry.dependencies), entry.line_count,
-                     entry.access_count, entry.relevance_score, entry.freshness,
-                     entry.file_mtime, entry.created, entry.compression_level,
-                     int(entry.is_stale)),
-                )
-                cur.execute(
-                    "INSERT INTO memories_fts (memory_id, symbol_name, summary, keywords) VALUES (?, ?, ?, ?)",
-                    (entry.memory_id, entry.symbol_name, entry.summary, " ".join(entry.keywords)),
-                )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
+        # Buffer for SQLite flush on close()
+        for entry in entries:
+            self._pending[entry.memory_id] = entry
+        self._dirty = True
 
     def get(self, memory_id: str) -> MemoryEntry | None:
-        """Fetch a single memory by ID."""
-        # Check Redis first
+        """Fetch a single memory by ID. Redis first, pending buffer, then SQLite fallback."""
+        # 1. Check Redis
         cached = self._cache.get_entry(memory_id)
         if cached is not None:
             return cached
 
-        row = self._conn.execute(
+        # 2. Check pending buffer
+        if memory_id in self._pending:
+            return self._pending[memory_id]
+
+        # 3. SQLite cold-start fallback
+        conn = self._get_sqlite()
+        row = conn.execute(
             "SELECT * FROM memories WHERE memory_id = ?", (memory_id,)
         ).fetchone()
         if row is None:
             return None
         entry = self._row_to_entry(row)
-        # Backfill cache
+        # Backfill Redis
         self._cache.put_entry(entry)
         return entry
 
     def search_fts(self, query: str, limit: int = 10) -> list[MemoryEntry]:
-        """Full-text search with BM25 ranking. Checks Redis cache first."""
-        # Check Redis FTS cache
+        """Full-text search. Redis FTS cache first, then SQLite FTS5 fallback."""
+        # 1. Check Redis FTS cache
         cached = self._cache.get_fts(query)
         if cached is not None:
             return cached[:limit]
 
-        # Escape special FTS5 characters
+        # 2. SQLite FTS5 fallback (cold-start or cache miss)
+        conn = self._get_sqlite()
         safe_query = query.replace('"', '""')
         try:
-            rows = self._conn.execute(
+            rows = conn.execute(
                 """
                 SELECT m.* FROM memories m
                 JOIN memories_fts fts ON m.memory_id = fts.memory_id
@@ -579,9 +540,8 @@ class MemoryStore:
                 (f'"{safe_query}" OR {safe_query}', limit),
             ).fetchall()
         except sqlite3.OperationalError:
-            # Fallback: simple LIKE search if FTS query fails
             like = f"%{query}%"
-            rows = self._conn.execute(
+            rows = conn.execute(
                 """
                 SELECT * FROM memories
                 WHERE summary LIKE ? OR symbol_name LIKE ? OR keywords LIKE ?
@@ -592,7 +552,7 @@ class MemoryStore:
             ).fetchall()
         results = [self._row_to_entry(r) for r in rows]
 
-        # Cache results in Redis
+        # Cache in Redis for next time
         self._cache.put_fts(query, results)
         return results
 
@@ -610,7 +570,8 @@ class MemoryStore:
                 entries.sort(key=lambda e: (e.kind, e.symbol_name))
                 return entries
 
-        rows = self._conn.execute(
+        conn = self._get_sqlite()
+        rows = conn.execute(
             "SELECT * FROM memories WHERE file_path = ? ORDER BY kind, symbol_name",
             (file_path,),
         ).fetchall()
@@ -635,7 +596,8 @@ class MemoryStore:
                 return entries
 
         # 2. SQLite fallback
-        rows = self._conn.execute(
+        conn = self._get_sqlite()
+        rows = conn.execute(
             "SELECT * FROM memories WHERE kind = ? ORDER BY relevance_score DESC LIMIT ?",
             (kind, limit),
         ).fetchall()
@@ -660,23 +622,24 @@ class MemoryStore:
                 return entries
 
         # 2. SQLite fallback (exact match, then prefix)
+        conn = self._get_sqlite()
         if kind:
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT * FROM memories WHERE symbol_name = ? AND kind = ? ORDER BY relevance_score DESC",
                 (name, kind),
             ).fetchall()
             if not rows:
-                rows = self._conn.execute(
+                rows = conn.execute(
                     "SELECT * FROM memories WHERE symbol_name LIKE ? AND kind = ? ORDER BY relevance_score DESC LIMIT 20",
                     (f"{name}%", kind),
                 ).fetchall()
         else:
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT * FROM memories WHERE symbol_name = ? ORDER BY relevance_score DESC",
                 (name,),
             ).fetchall()
             if not rows:
-                rows = self._conn.execute(
+                rows = conn.execute(
                     "SELECT * FROM memories WHERE symbol_name LIKE ? ORDER BY relevance_score DESC LIMIT 20",
                     (f"{name}%",),
                 ).fetchall()
@@ -688,16 +651,15 @@ class MemoryStore:
 
     def get_dependencies(self, file_path: str) -> dict:
         """Get what a file imports and what imports it."""
-        # What this file imports
-        row = self._conn.execute(
+        conn = self._get_sqlite()
+        row = conn.execute(
             "SELECT dependencies FROM memories WHERE file_path = ? AND kind = 'module'",
             (file_path,),
         ).fetchone()
         imports = json.loads(row["dependencies"]) if row else []
 
-        # What imports this file (search dependencies that mention this file's module name)
         module_name = Path(file_path).stem
-        rows = self._conn.execute(
+        rows = conn.execute(
             "SELECT DISTINCT file_path FROM memories WHERE kind = 'module' AND dependencies LIKE ? AND file_path != ?",
             (f"%{module_name}%", file_path),
         ).fetchall()
@@ -706,63 +668,75 @@ class MemoryStore:
         return {"imports": imports, "imported_by": imported_by}
 
     def touch(self, memory_id: str) -> None:
-        """Increment access_count and update freshness on retrieval (Hebbian)."""
+        """Increment access_count and update freshness. Redis only — SQLite deferred."""
         now = time.time()
-        self._conn.execute(
-            """
-            UPDATE memories
-            SET access_count = access_count + 1, freshness = ?
-            WHERE memory_id = ?
-            """,
-            (now, memory_id),
-        )
-        self._conn.commit()
+        # Update in pending buffer if exists
+        if memory_id in self._pending:
+            self._pending[memory_id].access_count += 1
+            self._pending[memory_id].freshness = now
+            return
+        # Update Redis entry
+        cached = self._cache.get_entry(memory_id)
+        if cached:
+            cached.access_count += 1
+            cached.freshness = now
+            self._cache.put_entry(cached)
+            self._pending[memory_id] = cached
+            self._dirty = True
 
     def touch_batch(self, memory_ids: list[str]) -> None:
-        """Batch touch: increment access_count and update freshness for multiple entries."""
-        if not memory_ids:
-            return
-        now = time.time()
-        self._conn.executemany(
-            "UPDATE memories SET access_count = access_count + 1, freshness = ? WHERE memory_id = ?",
-            [(now, mid) for mid in memory_ids],
-        )
-        self._conn.commit()
+        """Batch touch — Redis only, SQLite deferred."""
+        for mid in memory_ids:
+            self.touch(mid)
 
     def update_relevance(self, memory_id: str, relevance_score: float) -> None:
-        """Lightweight relevance update without full upsert (avoids FTS5 delete+insert)."""
-        self._conn.execute(
-            "UPDATE memories SET relevance_score = ? WHERE memory_id = ?",
-            (relevance_score, memory_id),
-        )
-        self._conn.commit()
+        """Update relevance score. Redis only — SQLite deferred."""
+        if memory_id in self._pending:
+            self._pending[memory_id].relevance_score = relevance_score
+            return
+        cached = self._cache.get_entry(memory_id)
+        if cached:
+            cached.relevance_score = relevance_score
+            self._cache.put_entry(cached)
+            self._pending[memory_id] = cached
+            self._dirty = True
 
     def delete(self, memory_id: str) -> bool:
-        """Delete a memory and its FTS entry. Cleans up all Redis indexes."""
-        # Get full entry info for cache invalidation
-        row = self._conn.execute(
-            "SELECT file_path, symbol_name, kind FROM memories WHERE memory_id = ?", (memory_id,)
-        ).fetchone()
-        file_path = row["file_path"] if row else None
-        symbol_name = row["symbol_name"] if row else None
-        kind = row["kind"] if row else None
+        """Delete a memory. Redis immediate, SQLite deferred."""
+        # Get entry info for Redis cleanup
+        entry = self._pending.pop(memory_id, None)
+        if entry is None:
+            entry = self._cache.get_entry(memory_id)
+        if entry is None:
+            conn = self._get_sqlite()
+            row = conn.execute(
+                "SELECT file_path, symbol_name, kind FROM memories WHERE memory_id = ?", (memory_id,)
+            ).fetchone()
+            if row:
+                self._cache.delete_entry(memory_id, row["file_path"], row["symbol_name"], row["kind"])
+            self._pending_deletes.add(memory_id)
+            self._dirty = True
+            return row is not None
 
-        cur = self._conn.cursor()
-        cur.execute("DELETE FROM memories_fts WHERE memory_id = ?", (memory_id,))
-        cur.execute("DELETE FROM memories WHERE memory_id = ?", (memory_id,))
-        self._conn.commit()
-
-        self._cache.delete_entry(memory_id, file_path, symbol_name, kind)
-        return cur.rowcount > 0
+        self._cache.delete_entry(memory_id, entry.file_path, entry.symbol_name, entry.kind)
+        self._pending_deletes.add(memory_id)
+        self._dirty = True
+        return True
 
     def delete_by_file(self, file_path: str) -> int:
         """Delete all memories for a file."""
-        ids = [
-            r["memory_id"]
-            for r in self._conn.execute(
-                "SELECT memory_id FROM memories WHERE file_path = ?", (file_path,)
-            ).fetchall()
-        ]
+        # Check Redis file set
+        cached_ids = self._cache.get_file_entries(file_path)
+        ids = list(cached_ids) if cached_ids else []
+        # Also check SQLite
+        if not ids:
+            conn = self._get_sqlite()
+            ids = [
+                r["memory_id"]
+                for r in conn.execute(
+                    "SELECT memory_id FROM memories WHERE file_path = ?", (file_path,)
+                ).fetchall()
+            ]
         for mid in ids:
             self.delete(mid)
         self._cache.invalidate_file(file_path)
@@ -770,9 +744,10 @@ class MemoryStore:
 
     def delete_stale(self) -> int:
         """Delete all stale memories."""
+        conn = self._get_sqlite()
         ids = [
             r["memory_id"]
-            for r in self._conn.execute(
+            for r in conn.execute(
                 "SELECT memory_id FROM memories WHERE is_stale = 1"
             ).fetchall()
         ]
@@ -782,8 +757,9 @@ class MemoryStore:
 
     def evict_lowest(self, count: int) -> int:
         """Evict lowest-relevance memories, skipping recently accessed ones."""
+        conn = self._get_sqlite()
         one_hour_ago = time.time() - 3600
-        rows = self._conn.execute(
+        rows = conn.execute(
             """
             SELECT memory_id FROM memories
             WHERE freshness < ?
@@ -800,23 +776,28 @@ class MemoryStore:
 
     def count(self) -> int:
         """Total number of memories."""
-        row = self._conn.execute("SELECT COUNT(*) AS c FROM memories").fetchone()
-        return row["c"]
+        conn = self._get_sqlite()
+        row = conn.execute("SELECT COUNT(*) AS c FROM memories").fetchone()
+        return row["c"] + len(self._pending)
 
     def stats(self) -> dict:
         """Aggregate statistics about the memory store."""
         total = self.count()
+        conn = self._get_sqlite()
         kinds = {}
-        for r in self._conn.execute(
+        for r in conn.execute(
             "SELECT kind, COUNT(*) AS c FROM memories GROUP BY kind"
         ).fetchall():
             kinds[r["kind"]] = r["c"]
+        # Include pending entries in kind counts
+        for entry in self._pending.values():
+            kinds[entry.kind] = kinds.get(entry.kind, 0) + 1
 
-        stale_count = self._conn.execute(
+        stale_count = conn.execute(
             "SELECT COUNT(*) AS c FROM memories WHERE is_stale = 1"
         ).fetchone()["c"]
 
-        top_accessed = self._conn.execute(
+        top_accessed = conn.execute(
             "SELECT symbol_name, file_path, access_count FROM memories "
             "ORDER BY access_count DESC LIMIT 5"
         ).fetchall()
@@ -829,6 +810,7 @@ class MemoryStore:
             else 0,
             "by_kind": kinds,
             "stale": stale_count,
+            "pending_flush": len(self._pending),
             "top_accessed": [
                 {"symbol": r["symbol_name"], "file": r["file_path"], "count": r["access_count"]}
                 for r in top_accessed
@@ -842,46 +824,112 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def add_file_link(self, source_path: str, target_path: str, link_type: str, symbol_name: str | None = None) -> None:
-        """Add a directed link between two files."""
-        self._conn.execute(
-            "INSERT OR REPLACE INTO file_links (source_path, target_path, link_type, symbol_name) VALUES (?, ?, ?, ?)",
-            (source_path, target_path, link_type, symbol_name))
-        self._conn.commit()
+        """Add a directed link between two files. Deferred to close()."""
+        self._pending_links.append((source_path, target_path, link_type, symbol_name))
+        self._dirty = True
 
     def add_file_links_batch(self, links: list[tuple[str, str, str, str | None]]) -> None:
-        """Batch add file links. Each tuple: (source, target, link_type, symbol_name)."""
-        if not links:
-            return
-        self._conn.executemany(
-            "INSERT OR REPLACE INTO file_links (source_path, target_path, link_type, symbol_name) VALUES (?, ?, ?, ?)", links)
-        self._conn.commit()
+        """Batch add file links. Deferred to close()."""
+        self._pending_links.extend(links)
+        self._dirty = True
 
     def get_outbound_links(self, source_path: str) -> list[dict]:
         """Get all files that source_path imports/includes."""
-        rows = self._conn.execute("SELECT * FROM file_links WHERE source_path = ? ORDER BY target_path", (source_path,)).fetchall()
+        conn = self._get_sqlite()
+        rows = conn.execute("SELECT * FROM file_links WHERE source_path = ? ORDER BY target_path", (source_path,)).fetchall()
         return [{"source_path": r["source_path"], "target_path": r["target_path"],
                  "link_type": r["link_type"], "symbol_name": r["symbol_name"]} for r in rows]
 
     def get_inbound_links(self, target_path: str) -> list[dict]:
         """Get all files that import/include target_path."""
-        rows = self._conn.execute("SELECT * FROM file_links WHERE target_path = ? ORDER BY source_path", (target_path,)).fetchall()
+        conn = self._get_sqlite()
+        rows = conn.execute("SELECT * FROM file_links WHERE target_path = ? ORDER BY source_path", (target_path,)).fetchall()
         return [{"source_path": r["source_path"], "target_path": r["target_path"],
                  "link_type": r["link_type"], "symbol_name": r["symbol_name"]} for r in rows]
 
     def get_hub_files(self, limit: int = 10) -> list[dict]:
         """Get files with the most inbound links (architectural pillars)."""
-        rows = self._conn.execute(
+        conn = self._get_sqlite()
+        rows = conn.execute(
             "SELECT target_path, COUNT(*) as inbound_count FROM file_links GROUP BY target_path ORDER BY inbound_count DESC LIMIT ?",
             (limit,)).fetchall()
         return [{"file_path": r["target_path"], "inbound_count": r["inbound_count"]} for r in rows]
 
     def clear_file_links(self, source_path: str) -> None:
-        """Clear all outbound links for a file (before re-indexing)."""
-        self._conn.execute("DELETE FROM file_links WHERE source_path = ?", (source_path,))
-        self._conn.commit()
+        """Clear all outbound links for a file. Deferred to close()."""
+        conn = self._get_sqlite()
+        conn.execute("DELETE FROM file_links WHERE source_path = ?", (source_path,))
+        conn.commit()
 
     def close(self) -> None:
-        self._conn.close()
+        """Flush all pending writes to SQLite for durability, then close."""
+        if self._dirty:
+            self._flush_to_sqlite()
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def _flush_to_sqlite(self) -> None:
+        """Bulk-write all pending entries and deletes to SQLite."""
+        conn = self._get_sqlite()
+        cur = conn.cursor()
+        t0 = time.time()
+
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+
+            # 1. Process deletes
+            for memory_id in self._pending_deletes:
+                cur.execute("DELETE FROM memories_fts WHERE memory_id = ?", (memory_id,))
+                cur.execute("DELETE FROM memories WHERE memory_id = ?", (memory_id,))
+
+            # 2. Process upserts
+            for entry in self._pending.values():
+                cur.execute("DELETE FROM memories_fts WHERE memory_id = ?", (entry.memory_id,))
+                cur.execute(
+                    """INSERT OR REPLACE INTO memories
+                        (memory_id, file_path, symbol_name, kind, summary, keywords,
+                         dependencies, line_count, access_count, relevance_score, freshness,
+                         file_mtime, created, compression_level, is_stale)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (entry.memory_id, entry.file_path, entry.symbol_name,
+                     entry.kind, entry.summary, json.dumps(entry.keywords),
+                     json.dumps(entry.dependencies), entry.line_count,
+                     entry.access_count, entry.relevance_score, entry.freshness,
+                     entry.file_mtime, entry.created, entry.compression_level,
+                     int(entry.is_stale)),
+                )
+                cur.execute(
+                    "INSERT INTO memories_fts (memory_id, symbol_name, summary, keywords) VALUES (?, ?, ?, ?)",
+                    (entry.memory_id, entry.symbol_name, entry.summary, " ".join(entry.keywords)),
+                )
+
+            # 3. Process file links
+            if self._pending_links:
+                cur.executemany(
+                    "INSERT OR REPLACE INTO file_links (source_path, target_path, link_type, symbol_name) VALUES (?, ?, ?, ?)",
+                    self._pending_links,
+                )
+
+            conn.commit()
+
+            elapsed = time.time() - t0
+            logger.info(
+                "SQLite flush: %d entries, %d deletes, %d links in %.2fs",
+                len(self._pending), len(self._pending_deletes),
+                len(self._pending_links), elapsed,
+            )
+
+            # Clear buffers
+            self._pending.clear()
+            self._pending_deletes.clear()
+            self._pending_links.clear()
+            self._dirty = False
+
+        except Exception:
+            conn.rollback()
+            logger.error("SQLite flush failed — data preserved in Redis")
+            raise
 
     # ------------------------------------------------------------------
     # Internal
