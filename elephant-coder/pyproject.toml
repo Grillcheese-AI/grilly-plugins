@@ -1,6 +1,6 @@
 [project]
 name = "elephant-coder"
-version = "0.3.16"
+version = "0.3.17"
 description = "MCP server for persistent codebase memory — invisible knowledge injection for Claude Code"
 requires-python = ">=3.12"
 dependencies = [

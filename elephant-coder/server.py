@@ -18,6 +18,15 @@ import logging
 import os
 import subprocess
 import sys
+
+# Force unbuffered stdout — required for MCP stdio transport on Windows.
+# Without this, tool responses may sit in Python's stdout buffer and never
+# reach Claude Code until a signal (like Escape) flushes the pipe.
+os.environ["PYTHONUNBUFFERED"] = "1"
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(write_through=True)
 import time
 from pathlib import Path
 
