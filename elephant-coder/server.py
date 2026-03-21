@@ -42,8 +42,14 @@ def _run_git(args: list[str], cwd: str, timeout: int = 10) -> subprocess.Complet
     """Run a git command in a thread pool to avoid blocking MCP's asyncio loop."""
     def _do():
         return subprocess.run(
-            args, capture_output=True, text=True, cwd=cwd, timeout=timeout,
-            env={**os.environ},  # inherit full env including PATH
+            args,
+            stdin=subprocess.DEVNULL,  # don't inherit MCP's stdio
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            timeout=timeout,
+            env={**os.environ},
         )
     future = _git_executor.submit(_do)
     return future.result(timeout=timeout + 2)

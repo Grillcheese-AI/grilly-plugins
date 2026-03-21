@@ -102,7 +102,8 @@ def _git_recent_changes(project_root: str) -> str:
     try:
         result = subprocess.run(
             ["git", "log", "--since=7 days ago", "--name-only", "--pretty=format:", "--diff-filter=ACMR"],
-            capture_output=True, text=True, cwd=project_root, timeout=5)
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=project_root, timeout=5)
         if result.returncode == 0:
             files = list(dict.fromkeys(f.strip() for f in result.stdout.strip().split('\n') if f.strip()))
             if files:
