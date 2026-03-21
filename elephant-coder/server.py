@@ -40,10 +40,15 @@ from consolidator import consolidate, detect_stale, should_consolidate
 
 def _run_git(args: list[str], cwd: str, timeout: int = 10) -> subprocess.CompletedProcess:
     """Run a git command in a thread pool to avoid blocking MCP's asyncio loop."""
-    future = _git_executor.submit(
-        subprocess.run, args, capture_output=True, text=True, cwd=cwd, timeout=timeout
-    )
+    def _do():
+        return subprocess.run(
+            args, capture_output=True, text=True, cwd=cwd, timeout=timeout,
+            env={**os.environ},  # inherit full env including PATH
+        )
+    future = _git_executor.submit(_do)
     return future.result(timeout=timeout + 2)
+
+
 from indexer import index_file
 from link_graph import resolve_python_imports, resolve_cpp_includes, detect_shader_dispatches, resolve_module_to_path
 from mental_model import generate_mental_model
