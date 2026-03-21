@@ -27,21 +27,25 @@ def _add_project_identity(store, project_root: str, lines: list[str]) -> None:
     root_name = Path(project_root).name
     lines.append(f"### {root_name}")
     lines.append("")
-    conn = store._get_sqlite()
-    rows = conn.execute(
-        "SELECT symbol_name, summary, line_count FROM memories WHERE kind = 'module' AND file_path LIKE ? ORDER BY line_count DESC LIMIT 10",
-        (f"{project_root}%",)).fetchall()
-    if rows:
+    # Use Redis-backed search instead of raw SQLite to avoid WAL contention
+    entries = store.search_by_kind("module", limit=10)
+    # Filter to current project and sort by line count
+    entries = [e for e in entries if e.file_path and e.file_path.startswith(project_root)]
+    entries.sort(key=lambda e: e.line_count or 0, reverse=True)
+    if entries:
         lines.append("**Key modules:**")
-        for r in rows:
-            lc = f" [{r['line_count']}L]" if r['line_count'] else ""
-            summary = r['summary'].split('\n')[0][:100]
-            lines.append(f"- {r['symbol_name']}{lc}: {summary}")
+        for e in entries[:10]:
+            lc = f" [{e.line_count}L]" if e.line_count else ""
+            summary = e.summary.split('\n')[0][:100]
+            lines.append(f"- {e.symbol_name}{lc}: {summary}")
         lines.append("")
 
 
 def _add_architecture(store, project_root: str, lines: list[str]) -> None:
-    hubs = store.get_hub_files(limit=10)
+    try:
+        hubs = store.get_hub_files(limit=10)
+    except Exception:
+        hubs = []
     if hubs:
         lines.append("### Most Connected Files (architectural pillars)")
         lines.append("")
