@@ -73,7 +73,10 @@ def _db_dir(project_root: str) -> Path:
 
 
 def _project_hash(project_root: str) -> str:
-    return hashlib.sha256(project_root.encode()).hexdigest()[:12]
+    # Normalize to resolved absolute path so the hash is stable across
+    # forward/back slashes and case differences on Windows
+    normalized = str(Path(project_root).resolve())
+    return hashlib.sha256(normalized.encode()).hexdigest()[:12]
 
 
 def _entry_to_dict(entry: MemoryEntry) -> dict:
