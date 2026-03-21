@@ -599,6 +599,9 @@ def set_project_root(path: str) -> str:
     _stores.clear()
     _vector_stores.clear()
     _module_systems.clear()
+    # Warm background cache (git log, frameworks) in daemon thread
+    from mental_model import warm_cache
+    warm_cache(resolved)
     logger.info("Project root set to: %s", resolved)
     return f"Project root set to: {resolved}"
 
@@ -792,19 +795,7 @@ def project_overview() -> str:
     """
     store = _get_store()
     project_root = _detect_project_root()
-    model = generate_mental_model(store, project_root)
-
-    # Framework detection
-    frameworks = detect_frameworks(project_root)
-    if frameworks:
-        model += "\n### Detected Frameworks\n"
-        for fw in frameworks:
-            model += f"\n- **{fw['name']}** ({fw['detected_as']})"
-            if fw.get("github"):
-                model += f" — {fw['github']}"
-        model += "\n"
-
-    return model
+    return generate_mental_model(store, project_root)
 
 
 @mcp.tool()
