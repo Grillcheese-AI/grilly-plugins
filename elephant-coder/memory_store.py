@@ -585,30 +585,17 @@ class MemoryStore:
         return results
 
     def search_by_kind(self, kind: str, limit: int = 50) -> list[MemoryEntry]:
-        """Get memories filtered by kind. Redis first, SQLite fallback."""
-        # 1. Try Redis kind index
+        """Get memories filtered by kind. Redis only — no SQLite fallback."""
         cached_ids = self._cache.get_kind(kind)
-        if cached_ids:
-            entries = []
-            for mid in list(cached_ids)[:limit]:
-                e = self._cache.get_entry(mid)
-                if e is not None:
-                    entries.append(e)
-            if entries:
-                entries.sort(key=lambda e: e.relevance_score, reverse=True)
-                return entries
-
-        # 2. SQLite fallback
-        conn = self._get_sqlite()
-        rows = conn.execute(
-            "SELECT * FROM memories WHERE kind = ? ORDER BY relevance_score DESC LIMIT ?",
-            (kind, limit),
-        ).fetchall()
-        results = [self._row_to_entry(r) for r in rows]
-        # Backfill Redis
-        for e in results:
-            self._cache.put_entry(e)
-        return results
+        if not cached_ids:
+            return []
+        entries = []
+        for mid in list(cached_ids)[:limit]:
+            e = self._cache.get_entry(mid)
+            if e is not None:
+                entries.append(e)
+        entries.sort(key=lambda e: e.relevance_score, reverse=True)
+        return entries
 
     def search_by_symbol(self, name: str, kind: str | None = None) -> list[MemoryEntry]:
         """Direct symbol lookup by name. Redis first, SQLite fallback."""
