@@ -4,7 +4,7 @@
       "command": "python",
       "args": [
         "-u",
-        "${CLAUDE_PLUGIN_ROOT}/marketplaces/grilly-plugins/elephant-coder/server.py"
+        "${CLAUDE_PLUGIN_ROOT}/server.py"
       ]
     }
   }
