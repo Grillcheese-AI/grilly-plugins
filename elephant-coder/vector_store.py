@@ -127,7 +127,7 @@ class QdrantBackend:
                 vector=vector.tolist(),
                 payload=payload,
             )
-            self._client.upsert(collection_name=COLLECTION_NAME, points=[point])
+            self._client.upsert(collection_name=COLLECTION_NAME, points=[point], wait=False)
         except Exception as exc:
             logger.warning("Qdrant upsert failed: %s", exc)
 
@@ -147,7 +147,7 @@ class QdrantBackend:
                     vector=vector.tolist(),
                     payload=payload,
                 ))
-            self._client.upsert(collection_name=COLLECTION_NAME, points=points)
+            self._client.upsert(collection_name=COLLECTION_NAME, points=points, wait=False)
         except Exception as exc:
             logger.warning("Qdrant batch upsert failed: %s", exc)
 
