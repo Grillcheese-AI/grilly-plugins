@@ -21,10 +21,11 @@ def detect_stale(store: MemoryStore) -> int:
     """Mark memories as stale if their source file has been modified."""
     conn = store._get_sqlite()
     rows = conn.execute(
-        "SELECT DISTINCT file_path FROM memories WHERE is_stale = 0"
+        "SELECT DISTINCT file_path, MAX(file_mtime) AS indexed_mtime "
+        "FROM memories WHERE is_stale = 0 GROUP BY file_path"
     ).fetchall()
 
-    stale_count = 0
+    # Batch stat all files up front
     stale_files: list[str] = []
     for row in rows:
         fp = row["file_path"]
@@ -32,24 +33,23 @@ def detect_stale(store: MemoryStore) -> int:
             actual_mtime = os.path.getmtime(fp)
         except OSError:
             actual_mtime = float("inf")
-
-        outdated = conn.execute(
-            "SELECT memory_id FROM memories WHERE file_path = ? AND file_mtime < ? AND is_stale = 0",
-            (fp, actual_mtime),
-        ).fetchall()
-
-        if outdated:
-            ids = [r["memory_id"] for r in outdated]
-            placeholders = ",".join("?" * len(ids))
-            conn.execute(
-                f"UPDATE memories SET is_stale = 1 WHERE memory_id IN ({placeholders})",
-                ids,
-            )
-            stale_count += len(ids)
+        if actual_mtime > row["indexed_mtime"]:
             stale_files.append(fp)
 
+    if not stale_files:
+        return 0
+
+    # Single batch UPDATE for all stale files
+    placeholders = ",".join("?" * len(stale_files))
+    conn.execute(
+        f"UPDATE memories SET is_stale = 1 "
+        f"WHERE is_stale = 0 AND file_path IN ({placeholders})",
+        stale_files,
+    )
+    stale_count = conn.execute("SELECT changes()").fetchone()[0]
+    conn.commit()
+
     if stale_count:
-        conn.commit()
         logger.info("Marked %d memories as stale", stale_count)
         invalidate_redis_cache(store, stale_files)
 

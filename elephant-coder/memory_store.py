@@ -779,14 +779,16 @@ class MemoryStore:
         conn = self._get_sqlite()
         row = conn.execute("SELECT COUNT(*) AS c FROM memories").fetchone()
         sqlite_count = row["c"]
-        # Only count pending entries not already in SQLite
-        new_pending = sum(
-            1 for mid in self._pending
-            if conn.execute(
-                "SELECT 1 FROM memories WHERE memory_id = ?", (mid,)
-            ).fetchone() is None
-        )
-        return sqlite_count + new_pending
+        if not self._pending:
+            return sqlite_count
+        # Batch check: count pending entries already in SQLite
+        pending_ids = list(self._pending.keys())
+        placeholders = ",".join("?" * len(pending_ids))
+        existing = conn.execute(
+            f"SELECT COUNT(*) AS c FROM memories WHERE memory_id IN ({placeholders})",
+            pending_ids,
+        ).fetchone()["c"]
+        return sqlite_count + len(pending_ids) - existing
 
     def stats(self) -> dict:
         """Aggregate statistics about the memory store."""
