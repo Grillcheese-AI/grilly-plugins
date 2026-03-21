@@ -160,9 +160,10 @@ class MeritLedger:
             project: Which project this was for
         """
         if points is None:
-            points = MERIT_VALUES.get(category, 0)
-        if points == 0 and category != "custom":
-            points = MERIT_VALUES.get(category, 1)
+            if category == "custom":
+                points = 1
+            else:
+                points = MERIT_VALUES.get(category, 1)
 
         now = time.time()
         total = self._get_total() + points

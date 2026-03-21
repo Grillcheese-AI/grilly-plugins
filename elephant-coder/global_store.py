@@ -125,7 +125,7 @@ class GlobalKnowledgeStore:
         try:
             rows = self._conn.execute(
                 "SELECT n.* FROM notes n JOIN notes_fts fts ON n.id = fts.rowid WHERE notes_fts MATCH ? ORDER BY bm25(notes_fts) ASC LIMIT ?",
-                (f'"{safe_query}" OR {safe_query}', limit)).fetchall()
+                (f'"{safe_query}"', limit)).fetchall()
         except sqlite3.OperationalError:
             like = f"%{query}%"
             rows = self._conn.execute("SELECT * FROM notes WHERE topic LIKE ? OR summary LIKE ? LIMIT ?", (like, like, limit)).fetchall()

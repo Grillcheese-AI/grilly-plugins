@@ -778,7 +778,15 @@ class MemoryStore:
         """Total number of memories."""
         conn = self._get_sqlite()
         row = conn.execute("SELECT COUNT(*) AS c FROM memories").fetchone()
-        return row["c"] + len(self._pending)
+        sqlite_count = row["c"]
+        # Only count pending entries not already in SQLite
+        new_pending = sum(
+            1 for mid in self._pending
+            if conn.execute(
+                "SELECT 1 FROM memories WHERE memory_id = ?", (mid,)
+            ).fetchone() is None
+        )
+        return sqlite_count + new_pending
 
     def stats(self) -> dict:
         """Aggregate statistics about the memory store."""

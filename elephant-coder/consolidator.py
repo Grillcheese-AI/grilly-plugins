@@ -65,8 +65,15 @@ def recompute_relevance(store: MemoryStore) -> int:
 
     updates = []
     for r in rows:
-        new_score = compute_relevance(r["access_count"], r["freshness"], r["created"])
-        updates.append((new_score, r["memory_id"]))
+        mid = r["memory_id"]
+        # Use pending buffer values if available (they're more current)
+        if mid in store._pending:
+            entry = store._pending[mid]
+            new_score = compute_relevance(entry.access_count, entry.freshness, entry.created)
+            entry.relevance_score = new_score
+        else:
+            new_score = compute_relevance(r["access_count"], r["freshness"], r["created"])
+        updates.append((new_score, mid))
 
     conn.executemany("UPDATE memories SET relevance_score = ? WHERE memory_id = ?", updates)
     conn.commit()

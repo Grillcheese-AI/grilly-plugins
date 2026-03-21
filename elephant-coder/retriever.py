@@ -67,9 +67,14 @@ def _rrf_merge(
             if entry:
                 entries[mid] = entry
 
-    # Sort by fused score descending
+    # Sort by fused score descending, propagate RRF scores to entries
     ranked_ids = sorted(scores.keys(), key=lambda mid: scores[mid], reverse=True)
-    return [entries[mid] for mid in ranked_ids if mid in entries]
+    merged = []
+    for mid in ranked_ids:
+        if mid in entries:
+            entries[mid].relevance_score = max(entries[mid].relevance_score, scores[mid])
+            merged.append(entries[mid])
+    return merged
 
 
 def recall(
@@ -103,14 +108,15 @@ def recall(
     if vector_ids:
         results = _rrf_merge(fts_results, vector_ids, store)
     else:
+        # FTS-only: assign rank-based scores so results aren't discarded
+        for rank, entry in enumerate(fts_results):
+            rrf_score = 1.0 / (RRF_K + rank)
+            entry.relevance_score = max(entry.relevance_score, rrf_score)
         results = fts_results
 
     # 4. Filter
     if kind:
         results = [r for r in results if r.kind == kind]
-
-    if relevance_threshold > 0:
-        results = [r for r in results if r.relevance_score >= relevance_threshold]
 
     results = results[:limit]
 

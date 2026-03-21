@@ -19,6 +19,7 @@ if _plugin_root not in sys.path:
 
 from indexer import index_file
 from memory_store import MemoryStore
+from settings import load_settings
 
 logger = logging.getLogger("elephant-coder.hooks.reindex")
 
@@ -42,14 +43,11 @@ def reindex_file(file_path: str) -> tuple[bool, int]:
 
     try:
         project_root = _detect_project_root(file_path)
-        store = MemoryStore(project_root)
+        settings = load_settings(project_root)
+        redis_url = settings.get("redis_url")
+        store = MemoryStore(project_root, redis_url=redis_url)
         entries = index_file(file_path)
         if entries:
-            store.upsert_batch(entries)
-            # Update file mtime on entries
-            mtime = os.path.getmtime(file_path)
-            for e in entries:
-                e.file_mtime = mtime
             store.upsert_batch(entries)
         store.close()
         return True, len(entries)

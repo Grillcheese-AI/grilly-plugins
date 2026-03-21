@@ -1485,7 +1485,7 @@ def start_think_tank(
 
 
 @mcp.tool()
-async def discuss_think_tank(meeting_id: str, message: str) -> str:
+def discuss_think_tank(meeting_id: str, message: str) -> str:
     """Send a message to the Think Tank and get responses from all executives.
 
     Each participant responds from their unique expertise perspective.
@@ -1495,6 +1495,8 @@ async def discuss_think_tank(meeting_id: str, message: str) -> str:
         meeting_id: The meeting ID from start_think_tank()
         message: Your message or question for the panel
     """
+    import asyncio
+
     tt = _get_think_tank()
     settings = _load_settings()
     ev = settings.get("external_validation", {})
@@ -1504,7 +1506,7 @@ async def discuss_think_tank(meeting_id: str, message: str) -> str:
     if not api_key:
         return "OpenRouter API key required. Set via /ec:configure or OPENROUTER_API_KEY env var."
 
-    responses = await tt.run_round(meeting_id, message, api_key, model)
+    responses = asyncio.run(tt.run_round(meeting_id, message, api_key, model))
     if not responses:
         return f"Meeting {meeting_id} not found or no responses generated."
 
