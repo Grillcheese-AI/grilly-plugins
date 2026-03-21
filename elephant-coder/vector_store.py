@@ -163,9 +163,9 @@ class QdrantBackend:
                 query_filter = Filter(must=[
                     FieldCondition(key="project_hash", match=MatchValue(value=self._project_hash))
                 ])
-            hits = self._client.search(
+            response = self._client.query_points(
                 collection_name=COLLECTION_NAME,
-                query_vector=vector.tolist(),
+                query=vector.tolist(),
                 query_filter=query_filter,
                 limit=limit,
             )
@@ -175,7 +175,7 @@ class QdrantBackend:
                     score=hit.score,
                     project_hash=hit.payload.get("project_hash", ""),
                 )
-                for hit in hits
+                for hit in response.points
             ]
         except Exception as exc:
             logger.warning("Qdrant search failed: %s", exc)
