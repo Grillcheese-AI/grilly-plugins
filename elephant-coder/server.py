@@ -18,6 +18,11 @@ import logging
 import os
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+# Shared thread pool for subprocess calls — avoids blocking MCP's asyncio loop
+_git_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="git")
 
 # Force unbuffered stdout — required for MCP stdio transport on Windows.
 # Without this, tool responses may sit in Python's stdout buffer and never
@@ -31,6 +36,14 @@ import time
 from pathlib import Path
 
 from consolidator import consolidate, detect_stale, should_consolidate
+
+
+def _run_git(args: list[str], cwd: str, timeout: int = 10) -> subprocess.CompletedProcess:
+    """Run a git command in a thread pool to avoid blocking MCP's asyncio loop."""
+    future = _git_executor.submit(
+        subprocess.run, args, capture_output=True, text=True, cwd=cwd, timeout=timeout
+    )
+    return future.result(timeout=timeout + 2)
 from indexer import index_file
 from link_graph import resolve_python_imports, resolve_cpp_includes, detect_shader_dispatches, resolve_module_to_path
 from mental_model import generate_mental_model
@@ -813,11 +826,11 @@ def what_broke(since: str = "1 day ago") -> str:
     project_root = _detect_project_root()
 
     try:
-        result = subprocess.run(
+        result = _run_git(
             ["git", "log", f"--since={since}", "--name-only", "--pretty=format:", "--diff-filter=ACMR"],
-            capture_output=True, text=True, cwd=project_root, timeout=10,
+            cwd=project_root,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+    except Exception as exc:
         return f"Could not run git: {exc}"
 
     if result.returncode != 0:
@@ -2160,17 +2173,14 @@ def recent_changes(days: int = 7, limit: int = 20) -> str:
     project_root = _detect_project_root()
 
     try:
-        result = subprocess.run(
+        result = _run_git(
             ["git", "log", f"--since={days} days ago", "--name-only",
              "--pretty=format:", "--diff-filter=ACMR"],
-            capture_output=True,
-            text=True,
             cwd=project_root,
-            timeout=10,
         )
         if result.returncode != 0:
             return f"git log failed: {result.stderr.strip()}"
-    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+    except Exception as exc:
         return f"Could not run git: {exc}"
 
     # Parse changed files (deduplicate, most recent first)
