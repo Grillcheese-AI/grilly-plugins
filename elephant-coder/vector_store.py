@@ -233,6 +233,139 @@ class QdrantBackend:
 
 
 # ------------------------------------------------------------------
+# ChromaDB Backend (preferred — in-process, persistent, fast ANN)
+# ------------------------------------------------------------------
+
+class ChromaBackend:
+    """ChromaDB vector backend — in-process persistent vector DB.
+
+    No external server required. Stores embeddings + metadata on disk
+    with HNSW indexing for fast ANN search. Project isolation via
+    collection-per-project.
+    """
+
+    def __init__(self, project_root: str, persist_dir: str | None = None):
+        self._project_hash = _project_hash(project_root)
+        self._available = False
+        self._collection = None
+        try:
+            import chromadb
+            if persist_dir is None:
+                persist_dir = str(Path.home() / ".elephant-coder" / "chromadb")
+            self._client = chromadb.PersistentClient(path=persist_dir)
+            coll_name = f"ec_{self._project_hash}"
+            self._collection = self._client.get_or_create_collection(
+                name=coll_name,
+                metadata={"hnsw:space": "cosine"},
+            )
+            self._available = True
+            logger.info(
+                "ChromaDB connected: %s (%d vectors, project %s)",
+                persist_dir, self._collection.count(), self._project_hash,
+            )
+        except ImportError:
+            logger.info("chromadb not installed — will use fallback")
+        except Exception as exc:
+            logger.warning("ChromaDB init failed: %s", exc)
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    def upsert(self, memory_id: str, vector: np.ndarray, metadata: dict | None = None) -> None:
+        if not self._available:
+            return
+        try:
+            meta = {"project_hash": self._project_hash}
+            if metadata:
+                # ChromaDB metadata values must be str, int, float, or bool
+                for k, v in metadata.items():
+                    if isinstance(v, (str, int, float, bool)):
+                        meta[k] = v
+            self._collection.upsert(
+                ids=[memory_id],
+                embeddings=[vector.tolist()],
+                metadatas=[meta],
+            )
+        except Exception as exc:
+            logger.warning("ChromaDB upsert failed: %s", exc)
+
+    def upsert_batch(self, items: list[tuple[str, np.ndarray, dict | None]]) -> None:
+        if not self._available or not items:
+            return
+        try:
+            ids = []
+            embeddings = []
+            metadatas = []
+            for memory_id, vector, metadata in items:
+                ids.append(memory_id)
+                embeddings.append(vector.tolist())
+                meta = {"project_hash": self._project_hash}
+                if metadata:
+                    for k, v in metadata.items():
+                        if isinstance(v, (str, int, float, bool)):
+                            meta[k] = v
+                metadatas.append(meta)
+            # ChromaDB handles batching internally
+            self._collection.upsert(ids=ids, embeddings=embeddings, metadatas=metadatas)
+        except Exception as exc:
+            logger.warning("ChromaDB batch upsert failed: %s", exc)
+
+    def search(self, vector: np.ndarray, limit: int = 10,
+               global_search: bool = False) -> list[VectorResult]:
+        if not self._available:
+            return []
+        try:
+            results = self._collection.query(
+                query_embeddings=[vector.tolist()],
+                n_results=min(limit, self._collection.count() or 1),
+            )
+            out = []
+            if results and results["ids"] and results["ids"][0]:
+                for i, mid in enumerate(results["ids"][0]):
+                    score = 1.0 - (results["distances"][0][i] if results.get("distances") else 0.0)
+                    out.append(VectorResult(
+                        memory_id=mid,
+                        score=max(score, 0.0),
+                        project_hash=self._project_hash,
+                    ))
+            return out
+        except Exception as exc:
+            logger.warning("ChromaDB search failed: %s", exc)
+            return []
+
+    def delete(self, memory_id: str) -> None:
+        if not self._available:
+            return
+        try:
+            self._collection.delete(ids=[memory_id])
+        except Exception:
+            pass
+
+    def delete_project(self) -> None:
+        if not self._available:
+            return
+        try:
+            self._client.delete_collection(f"ec_{self._project_hash}")
+            self._collection = None
+            self._available = False
+        except Exception:
+            pass
+
+    def count(self, global_count: bool = False) -> int:
+        if not self._available:
+            return 0
+        try:
+            return self._collection.count()
+        except Exception:
+            return 0
+
+    def flush(self) -> None:
+        """ChromaDB persists automatically — no-op."""
+        pass
+
+
+# ------------------------------------------------------------------
 # Local Numpy Backend (fallback)
 # ------------------------------------------------------------------
 
@@ -351,8 +484,9 @@ class LocalBackend:
 # ------------------------------------------------------------------
 
 class VectorStore:
-    """Unified vector store: Qdrant primary, local numpy fallback.
+    """Unified vector store: ChromaDB > Qdrant > local numpy.
 
+    Priority: ChromaDB (in-process, fast), Qdrant (remote), numpy (fallback).
     Project-scoped by default. Global search available for cross-project queries.
     """
 
@@ -360,17 +494,22 @@ class VectorStore:
         self._project_root = project_root
         self._encoder = Encoder()
 
-        # Try Qdrant first
+        # Try ChromaDB first (in-process, no server needed)
+        self._chroma: ChromaBackend | None = ChromaBackend(project_root)
+        if not self._chroma.available:
+            self._chroma = None
+
+        # Try Qdrant second (remote server)
         self._qdrant: QdrantBackend | None = None
-        if qdrant_url:
+        if qdrant_url and not self._chroma:
             self._qdrant = QdrantBackend(qdrant_url, project_root)
             if not self._qdrant.available:
                 self._qdrant = None
 
-        # Always initialize local backend (fallback + offline support)
+        # Always initialize local backend (final fallback)
         self._local = LocalBackend(project_root)
 
-        self._mode = "qdrant" if self._qdrant else "local"
+        self._mode = "chromadb" if self._chroma else ("qdrant" if self._qdrant else "local")
         logger.info("VectorStore mode: %s", self._mode)
 
     @property
@@ -384,9 +523,12 @@ class VectorStore:
     def upsert(self, memory_id: str, text: str, metadata: dict | None = None) -> None:
         """Embed and store a single entry."""
         vector = self._encoder.encode(text)[0]
-        if self._qdrant:
+        if self._chroma:
+            self._chroma.upsert(memory_id, vector, metadata)
+        elif self._qdrant:
             self._qdrant.upsert(memory_id, vector, metadata)
-        self._local.upsert(memory_id, vector, metadata)
+        else:
+            self._local.upsert(memory_id, vector, metadata)
 
     def upsert_batch(self, items: list[tuple[str, str, dict | None]]) -> None:
         """Embed and store multiple entries. items: [(memory_id, text, metadata), ...]"""
@@ -396,32 +538,44 @@ class VectorStore:
         vectors = self._encoder.encode(texts)
 
         batch = [(mid, vectors[i], meta) for i, (mid, _, meta) in enumerate(items)]
-        if self._qdrant:
+        if self._chroma:
+            self._chroma.upsert_batch(batch)
+        elif self._qdrant:
             self._qdrant.upsert_batch(batch)
-        self._local.upsert_batch(batch)
+        else:
+            self._local.upsert_batch(batch)
 
     def search(self, query: str, limit: int = 10,
                global_search: bool = False) -> list[VectorResult]:
         """Semantic search: encode query and find similar vectors."""
         vector = self._encoder.encode(query)[0]
+        if self._chroma:
+            results = self._chroma.search(vector, limit, global_search)
+            if results:
+                return results
         if self._qdrant:
             results = self._qdrant.search(vector, limit, global_search)
             if results:
                 return results
-        # Fallback to local
         return self._local.search(vector, limit, global_search)
 
     def delete(self, memory_id: str) -> None:
+        if self._chroma:
+            self._chroma.delete(memory_id)
         if self._qdrant:
             self._qdrant.delete(memory_id)
         self._local.delete(memory_id)
 
     def flush(self) -> None:
-        """Persist local vectors to disk."""
+        """Persist vectors to disk."""
+        if self._chroma:
+            self._chroma.flush()
         self._local.flush()
 
     def stats(self) -> dict:
         result = {"mode": self._mode, "encoder": "all-MiniLM-L6-v2", "dim": EMBED_DIM}
+        if self._chroma:
+            result["chromadb_vectors"] = self._chroma.count()
         if self._qdrant:
             result["qdrant_project_vectors"] = self._qdrant.count()
             result["qdrant_total_vectors"] = self._qdrant.count(global_count=True)

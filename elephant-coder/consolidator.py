@@ -39,14 +39,19 @@ def detect_stale(store: MemoryStore) -> int:
     if not stale_files:
         return 0
 
-    # Single batch UPDATE for all stale files
-    placeholders = ",".join("?" * len(stale_files))
-    conn.execute(
-        f"UPDATE memories SET is_stale = 1 "
-        f"WHERE is_stale = 0 AND file_path IN ({placeholders})",
-        stale_files,
-    )
-    stale_count = conn.execute("SELECT changes()").fetchone()[0]
+    # Batch UPDATE for all stale files — chunked to stay under
+    # SQLITE_MAX_VARIABLE_NUMBER (999).
+    stale_count = 0
+    chunk_size = 900
+    for i in range(0, len(stale_files), chunk_size):
+        chunk = stale_files[i : i + chunk_size]
+        placeholders = ",".join("?" * len(chunk))
+        conn.execute(
+            f"UPDATE memories SET is_stale = 1 "
+            f"WHERE is_stale = 0 AND file_path IN ({placeholders})",
+            chunk,
+        )
+        stale_count += conn.execute("SELECT changes()").fetchone()[0]
     conn.commit()
 
     if stale_count:

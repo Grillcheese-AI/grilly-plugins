@@ -771,13 +771,18 @@ class MemoryStore:
         sqlite_count = row["c"]
         if not self._pending:
             return sqlite_count
-        # Batch check: count pending entries already in SQLite
+        # Batch check: count pending entries already in SQLite.
+        # Chunk to stay under SQLITE_MAX_VARIABLE_NUMBER (999).
         pending_ids = list(self._pending.keys())
-        placeholders = ",".join("?" * len(pending_ids))
-        existing = conn.execute(
-            f"SELECT COUNT(*) AS c FROM memories WHERE memory_id IN ({placeholders})",
-            pending_ids,
-        ).fetchone()["c"]
+        existing = 0
+        chunk_size = 900  # safely under the 999 limit
+        for i in range(0, len(pending_ids), chunk_size):
+            chunk = pending_ids[i : i + chunk_size]
+            placeholders = ",".join("?" * len(chunk))
+            existing += conn.execute(
+                f"SELECT COUNT(*) AS c FROM memories WHERE memory_id IN ({placeholders})",
+                chunk,
+            ).fetchone()["c"]
         return sqlite_count + len(pending_ids) - existing
 
     def stats(self) -> dict:
