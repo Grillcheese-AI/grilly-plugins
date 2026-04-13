@@ -237,22 +237,22 @@ class QdrantBackend:
 # ------------------------------------------------------------------
 
 class ChromaBackend:
-    """ChromaDB vector backend — in-process persistent vector DB.
+    """ChromaDB vector backend — connects to a running ChromaDB server.
 
-    No external server required. Stores embeddings + metadata on disk
-    with HNSW indexing for fast ANN search. Project isolation via
-    collection-per-project.
+    Uses the lightweight HTTP client (chromadb-client or chromadb).
+    Server-side persistence + HNSW indexing for fast ANN search.
+    Project isolation via collection-per-project.
     """
 
-    def __init__(self, project_root: str, persist_dir: str | None = None):
+    def __init__(self, project_root: str, host: str = "localhost", port: int = 8899):
         self._project_hash = _project_hash(project_root)
         self._available = False
         self._collection = None
         try:
             import chromadb
-            if persist_dir is None:
-                persist_dir = str(Path.home() / ".elephant-coder" / "chromadb")
-            self._client = chromadb.PersistentClient(path=persist_dir)
+            self._client = chromadb.HttpClient(host=host, port=port)
+            # Quick health check
+            self._client.heartbeat()
             coll_name = f"ec_{self._project_hash}"
             self._collection = self._client.get_or_create_collection(
                 name=coll_name,
@@ -260,13 +260,13 @@ class ChromaBackend:
             )
             self._available = True
             logger.info(
-                "ChromaDB connected: %s (%d vectors, project %s)",
-                persist_dir, self._collection.count(), self._project_hash,
+                "ChromaDB connected: %s:%d (%d vectors, project %s)",
+                host, port, self._collection.count(), self._project_hash,
             )
         except ImportError:
             logger.info("chromadb not installed — will use fallback")
         except Exception as exc:
-            logger.warning("ChromaDB init failed: %s", exc)
+            logger.info("ChromaDB not available at %s:%d — %s", host, port, exc)
 
     @property
     def available(self) -> bool:
@@ -490,12 +490,14 @@ class VectorStore:
     Project-scoped by default. Global search available for cross-project queries.
     """
 
-    def __init__(self, project_root: str, qdrant_url: str | None = None):
+    def __init__(self, project_root: str, qdrant_url: str | None = None,
+                 chromadb_host: str = "localhost", chromadb_port: int = 8899):
         self._project_root = project_root
         self._encoder = Encoder()
 
-        # Try ChromaDB first (in-process, no server needed)
-        self._chroma: ChromaBackend | None = ChromaBackend(project_root)
+        # Try ChromaDB first (HTTP client to running server)
+        self._chroma: ChromaBackend | None = ChromaBackend(
+            project_root, host=chromadb_host, port=chromadb_port)
         if not self._chroma.available:
             self._chroma = None
 
