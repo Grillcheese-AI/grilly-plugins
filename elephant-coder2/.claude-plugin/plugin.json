@@ -1,0 +1,17 @@
+{
+  "name": "elephant-coder2",
+  "description": "Automatic memory activation for Claude Code: shadowed tools + local small-model hippocampus + three-tier cross-project memory",
+  "version": "0.1.0",
+  "author": {
+    "name": "grillcheese"
+  },
+  "keywords": [
+    "memory",
+    "indexing",
+    "codebase",
+    "hippocampus",
+    "llama-cpp",
+    "agentic",
+    "cross-project"
+  ]
+}
