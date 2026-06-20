@@ -37,7 +37,7 @@
       "name": "elephant-coder2",
       "source": "./elephant-coder2",
       "description": "Automatic memory activation: shadowed tools + local small-model hippocampus + three-tier cross-project memory",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "author": { "name": "grillcheese" },
       "repository": "https://github.com/grillcheese-ai/grilly-plugins",
       "keywords": ["memory", "hippocampus", "agentic", "llama-cpp", "cross-project"],

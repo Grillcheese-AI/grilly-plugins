@@ -1,7 +1,7 @@
 {
   "name": "elephant-coder2",
   "description": "Automatic memory activation for Claude Code: shadowed tools + local small-model hippocampus + three-tier cross-project memory",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "grillcheese"
   },
