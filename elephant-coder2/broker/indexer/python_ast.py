@@ -26,7 +26,8 @@ def _keywords_for(name: str, doc: str | None) -> str:
 
 
 def _summary(name: str, doc: str | None, kind: str) -> str:
-    first = (doc or "").strip().splitlines()[0] if doc else ""
+    lines = (doc or "").strip().splitlines()      # whitespace-only doc -> [] (not [0] IndexError)
+    first = lines[0] if lines else ""
     if first:
         return f"{kind} {name}: {first[:160]}"
     return f"{kind} {name}"

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.1] - 2026-06-21
+
+- Fix `_summary` IndexError when a markdown heading (or any doc) strips to a
+  whitespace-only string — `splitlines()` returns `[]`, so `[0]` crashed the whole
+  index pass. Surfaced indexing cubby-lm (72 files / 574 entries). Regression test added.
+
 ## [0.6.0] - 2026-06-20
 
 - `preview-check` skill — for visual/runtime deliverables (web/UI/game/render),

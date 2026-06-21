@@ -2,6 +2,16 @@ from broker.indexer.regex_extract import index_ts_source, index_c_source
 from broker.indexer.structured import index_markdown, index_toml
 
 
+def test_markdown_heading_with_blank_body_does_not_crash():
+    # regression: a heading whose body strips to "" -> splitlines() == [] ; _summary
+    # must not IndexError on [0]
+    src = "# Title\n   \n\n## Next\nreal body\n"
+    entries = index_markdown(src, "x.md", 0.0)
+    syms = {e.symbol for e in entries}
+    assert "Title" in syms and "Next" in syms
+    assert all(e.summary for e in entries)   # non-empty, no crash
+
+
 def test_ts_functions_and_classes():
     src = '''
 export function verify(token: string): boolean { return true; }
