@@ -160,6 +160,34 @@ class SQLiteStore:
         ).fetchall()
         return [_row_to_entry(r) for r in rows]
 
+    def search_content(self, substr: str, limit: int = 20) -> list[MemoryEntry]:
+        """Substring match against the raw content body (LIKE). content is not in
+        the FTS index, so this is the path for co-reference lookups."""
+        rows = self._conn.execute(
+            "SELECT * FROM memories WHERE content LIKE ? LIMIT ?",
+            (f"%{substr}%", limit),
+        ).fetchall()
+        return [_row_to_entry(r) for r in rows]
+
+    def by_kind(self, kind: str) -> list[MemoryEntry]:
+        rows = self._conn.execute(
+            "SELECT * FROM memories WHERE kind = ? ORDER BY id DESC", (kind,)
+        ).fetchall()
+        return [_row_to_entry(r) for r in rows]
+
+    def recent(self, limit: int = 10, kind: str | None = None) -> list[MemoryEntry]:
+        """Most-recently-created entries first (id is monotonic with insertion)."""
+        if kind:
+            rows = self._conn.execute(
+                "SELECT * FROM memories WHERE kind = ? ORDER BY id DESC LIMIT ?",
+                (kind, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM memories ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [_row_to_entry(r) for r in rows]
+
     def count(self, tier: str | None = None) -> int:
         if tier:
             return self._conn.execute(

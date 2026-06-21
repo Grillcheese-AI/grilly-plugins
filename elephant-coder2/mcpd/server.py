@@ -97,5 +97,50 @@ def index(path: str = "") -> str:
     return _j(_handlers["index_path"]({"path": path or PROJECT_ROOT}))
 
 
+@server.tool()
+def recent(limit: int = 10, kind: str = "") -> str:
+    """Temporal recall: the most recently stored memories first. Optionally filter by kind."""
+    args = {"limit": limit}
+    if kind:
+        args["kind"] = kind
+    return _j(_handlers["recent"](args))
+
+
+@server.tool()
+def related(symbol: str, limit: int = 20) -> str:
+    """Navigate a symbol: its definitions plus every memory whose body references it."""
+    return _j(_handlers["related"]({"symbol": symbol, "limit": limit}))
+
+
+@server.tool()
+def brief(task: str, limit: int = 5) -> str:
+    """A ready-to-paste, token-lean memory brief for a task or subagent dispatch."""
+    return _j(_handlers["brief"]({"task": task, "limit": limit}))
+
+
+@server.tool()
+def sidecar_store(tag: str, content: str) -> str:
+    """Offload context under a tag (key-value). Re-storing the same tag replaces it. Pairs with sidecar_recall/list."""
+    return _j(_handlers["sidecar_store"]({"tag": tag, "content": content}))
+
+
+@server.tool()
+def sidecar_recall(key: str, limit: int = 5) -> str:
+    """Retrieve offloaded context by exact tag, or by hybrid query if no exact tag matches."""
+    return _j(_handlers["sidecar_recall"]({"key": key, "limit": limit}))
+
+
+@server.tool()
+def sidecar_list(prefix: str = "") -> str:
+    """List offloaded context tags, optionally filtered by prefix."""
+    return _j(_handlers["sidecar_list"]({"prefix": prefix}))
+
+
+@server.tool()
+def forget(memory_id: int) -> str:
+    """Delete a memory by id."""
+    return _j(_handlers["forget"]({"memory_id": memory_id}))
+
+
 if __name__ == "__main__":
     server.run()

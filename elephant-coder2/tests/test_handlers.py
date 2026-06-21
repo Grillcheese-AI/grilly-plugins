@@ -122,3 +122,88 @@ def test_ping(project, fake_embed):
         assert h["ping"]({})["pong"] is True
     finally:
         store.close()
+
+
+def test_sidecar_store_and_recall_by_tag(project, fake_embed):
+    store, h = _h(project)
+    try:
+        r = h["sidecar_store"]({"tag": "auth_findings", "content": "entry points: login(), logout()"})
+        assert "id" in r
+        # storing the same tag again replaces it (tag is a key; latest wins)
+        h["sidecar_store"]({"tag": "auth_findings", "content": "updated: login(), logout(), refresh()"})
+        hits = h["sidecar_recall"]({"key": "auth_findings"})
+        assert len(hits) == 1
+        assert "refresh" in hits[0]["content"]
+    finally:
+        store.close()
+
+
+def test_sidecar_recall_by_query(project, fake_embed):
+    store, h = _h(project)
+    try:
+        h["sidecar_store"]({"tag": "db_notes", "content": "Postgres uses pgvector for embeddings"})
+        hits = h["sidecar_recall"]({"key": "pgvector embeddings"})
+        assert any("pgvector" in x["content"] for x in hits)
+    finally:
+        store.close()
+
+
+def test_brief_renders(project, fake_embed):
+    store, h = _h(project)
+    try:
+        h["index_path"]({"path": str(project)})
+        out = h["brief"]({"task": "widget builder", "limit": 3})
+        assert isinstance(out["brief"], str)
+        assert "widget" in out["brief"].lower()
+        assert out["n"] >= 1
+    finally:
+        store.close()
+
+
+def test_related_finds_references(project, fake_embed):
+    store, h = _h(project)
+    try:
+        h["remember"]({"content": "def helper(): pass", "symbol": "helper", "summary": "helper fn"})
+        h["remember"]({"content": "this one calls helper() twice", "symbol": "caller", "summary": "caller"})
+        rel = h["related"]({"symbol": "helper"})
+        assert rel["definitions"][0]["symbol"] == "helper"
+        assert "caller" in {x["symbol"] for x in rel["references"]}
+        assert "helper" not in {x["symbol"] for x in rel["references"]}  # own defs excluded
+    finally:
+        store.close()
+
+
+def test_forget(project, fake_embed):
+    store, h = _h(project)
+    try:
+        r = h["remember"]({"content": "x", "symbol": "Temp", "summary": "s"})
+        h["forget"]({"memory_id": r["id"]})
+        assert store.sqlite.get(r["id"]) is None
+    finally:
+        store.close()
+
+
+def test_recent_orders_newest_first(project, fake_embed):
+    store, h = _h(project)
+    try:
+        h["remember"]({"content": "a", "symbol": "First", "summary": "first"})
+        h["remember"]({"content": "b", "symbol": "Second", "summary": "second"})
+        rec = h["recent"]({"limit": 2})
+        assert [r["symbol"] for r in rec] == ["Second", "First"]
+        assert "created_at" in rec[0]
+    finally:
+        store.close()
+
+
+def test_sidecar_list(project, fake_embed):
+    store, h = _h(project)
+    try:
+        h["sidecar_store"]({"tag": "ctx:auth", "content": "auth stuff"})
+        h["sidecar_store"]({"tag": "ctx:db", "content": "db stuff"})
+        h["remember"]({"content": "not a sidecar", "symbol": "ctx:other"})  # excluded
+        tags = {x["tag"] for x in h["sidecar_list"]({})}
+        assert tags == {"ctx:auth", "ctx:db"}
+        only_auth = h["sidecar_list"]({"prefix": "ctx:a"})
+        assert {x["tag"] for x in only_auth} == {"ctx:auth"}
+    finally:
+        store.close()

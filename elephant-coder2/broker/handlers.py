@@ -15,7 +15,7 @@ from .paths import project_dir, project_hash
 from .store import embedder
 from .store.sqlite_store import TIERS, MemoryEntry
 from .store.unified import UnifiedStore
-from .indexer.python_ast import index_python_source
+from .indexer.python_ast import _keywords_for, index_python_source
 from .indexer.regex_extract import index_c_source, index_glsl_source, index_ts_source
 from .indexer.structured import index_json, index_markdown, index_toml, index_yaml
 
@@ -205,6 +205,83 @@ def build_handlers(project_root: str, redis_url=_UNSET):
             "skipped": skipped,
         }
 
+    # ---- agentic power tools ----
+    _SIDECAR_KIND = "sidecar"
+
+    def op_sidecar_store(args):
+        """Offload context under a tag. Re-storing the same tag replaces it."""
+        tag = args["tag"]
+        content = args.get("content", "")
+        for e in store.sqlite.by_symbol(tag):
+            if e.kind == _SIDECAR_KIND:
+                store.delete(e.id)
+        entry = MemoryEntry(
+            file_path="", symbol=tag, kind=_SIDECAR_KIND, content=content,
+            summary=content[:160], keywords=_keywords_for(tag, content), tier="scratch",
+        )
+        return {"id": store.insert(entry), "tag": tag}
+
+    def op_sidecar_recall(args):
+        """Retrieve offloaded context: exact-tag first, else hybrid query over sidecar entries."""
+        key = args["key"]
+        exact = [e for e in store.sqlite.by_symbol(key) if e.kind == _SIDECAR_KIND]
+        if exact:
+            return [{"id": e.id, "tag": e.symbol, "content": e.content} for e in exact]
+        out = []
+        for b in op_recall({"query": key, "limit": int(args.get("limit", 5))}):
+            e = store.sqlite.get(b["id"])
+            if e and e.kind == _SIDECAR_KIND:
+                out.append({"id": e.id, "tag": e.symbol, "content": e.content})
+        return out
+
+    def op_brief(args):
+        """A ready-to-paste, token-lean memory brief for a task or subagent."""
+        task = args["task"]
+        hits = op_recall({"query": task, "limit": int(args.get("limit", 5))})
+        lines = [f"## Memory brief: {task}", ""]
+        if not hits:
+            lines.append("_No relevant memories._")
+        for h in hits:
+            lines.append(f"- **{h['symbol']}** ({h['file'] or '—'}) [{h['kind']}] — {h['summary']}")
+        return {"task": task, "n": len(hits), "brief": "\n".join(lines)}
+
+    def op_related(args):
+        """Definitions of a symbol plus every memory whose body references it."""
+        sym = args["symbol"]
+        limit = int(args.get("limit", 20))
+        defs = store.sqlite.by_symbol(sym)
+        refs = [e for e in store.sqlite.search_content(sym, limit=limit) if e.symbol != sym]
+        return {
+            "symbol": sym,
+            "definitions": [_brief(e) for e in defs],
+            "references": [_brief(e) for e in refs],
+        }
+
+    def op_forget(args):
+        mid = int(args["memory_id"])
+        store.delete(mid)
+        return {"forgot": mid}
+
+    def op_recent(args):
+        """Temporal recall (the recent_chats analog): newest memories first."""
+        limit = int(args.get("limit", 10))
+        kind = args.get("kind")
+        out = []
+        for e in store.sqlite.recent(limit, kind):
+            d = _brief(e)
+            d["created_at"] = e.created_at
+            out.append(d)
+        return out
+
+    def op_sidecar_list(args):
+        """Enumerate offloaded context tags (completes the KV store: store/recall/list/forget)."""
+        prefix = args.get("prefix") or ""
+        return [
+            {"tag": e.symbol, "id": e.id, "summary": e.summary}
+            for e in store.sqlite.by_kind(_SIDECAR_KIND)
+            if e.symbol.startswith(prefix)
+        ]
+
     handlers = {
         "ping": op_ping,
         "status": op_status,
@@ -214,5 +291,12 @@ def build_handlers(project_root: str, redis_url=_UNSET):
         "recall_file": op_recall_file,
         "search_symbol": op_search_symbol,
         "index_path": op_index_path,
+        "sidecar_store": op_sidecar_store,
+        "sidecar_recall": op_sidecar_recall,
+        "brief": op_brief,
+        "related": op_related,
+        "forget": op_forget,
+        "recent": op_recent,
+        "sidecar_list": op_sidecar_list,
     }
     return store, handlers
